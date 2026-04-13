@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+backend/data/vendor_profiles/*.json
+*.pdf
+*.png
+!frontend/src/assets/*.png
+*.log
+*.db
+*.png
