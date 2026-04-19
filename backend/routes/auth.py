@@ -115,84 +115,51 @@ class ResetPasswordRequest(BaseModel):
 # Endpoints
 # ──────────────────────────────────────────────
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
     request: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Register a new user account.
-
-    Creates the user with a hashed password and sends a verification email.
-    User must verify email before they can log in.
-    """
-    # Validate password strength
+    # Validate password
     pwd_error = validate_password(request.password)
     if pwd_error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=pwd_error,
-        )
+        raise HTTPException(status_code=400, detail=pwd_error)
 
-    # Check if email already exists
-    result = await db.execute(select(User).where(User.email == request.email.lower().strip()))
-    existing = result.scalar_one_or_none()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A user with this email already exists.",
-        )
+    # Check existing user
+    result = await db.execute(
+        select(User).where(User.email == request.email.lower().strip())
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="User already exists")
 
-    # Determine if SMTP is configured — if not, auto-verify for demo
-    smtp_configured = bool(SMTP_HOST and SMTP_USER)
-
-    # Generate verification token
-    verification_token = secrets.token_urlsafe(32)
-    verification_expires = datetime.now(timezone.utc) + timedelta(hours=24)
-
-    # Create user
-    first = request.first_name.strip()
-    last = request.last_name.strip()
+    # Create user (NO EMAIL VERIFICATION)
     user = User(
         email=request.email.lower().strip(),
         hashed_password=hash_password(request.password),
-        first_name=first,
-        last_name=last,
-        full_name=f"{first} {last}".strip(),
+        first_name=request.first_name.strip(),
+        last_name=request.last_name.strip(),
+        full_name=f"{request.first_name} {request.last_name}".strip(),
         company_name=request.company_name.strip(),
         mobile_number=request.mobile_number.strip() or None,
         landline_number=request.landline_number.strip() or None,
-        email_verified=not smtp_configured,  # Auto-verify if no SMTP
-        verification_token=verification_token if smtp_configured else None,
-        verification_token_expires=verification_expires if smtp_configured else None,
+        email_verified=True,   # ✅ important
     )
-    db.add(user)
-    await db.flush()  # Populate the id
 
-    if smtp_configured:
-        # Send verification email
-        try:
-            await send_verification_email(user.email, verification_token, user.full_name)
-            logger.info("Verification email sent to: %s", user.email)
-        except Exception as e:
-            logger.warning("Failed to send verification email to %s: %s", user.email, e)
-        logger.info("New user registered (pending verification): %s (%s)", user.email, user.id)
-        return RegisterResponse(
-            message="Account created. Please check your email to verify your account.",
-            user=user.to_dict(),
-            requires_verification=True,
-        )
-    else:
-        # No SMTP — auto-verify and return token so user can log in immediately
-        token = create_access_token(data={"sub": user.id, "email": user.email})
-        logger.info("New user registered (auto-verified, no SMTP): %s (%s)", user.email, user.id)
-        return {
-            "message": "Account created successfully!",
-            "user": user.to_dict(),
-            "requires_verification": False,
-            "token": token,
-            "token_type": "bearer",
-        }
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    # Generate token
+    token = create_access_token(
+        data={"sub": user.id, "email": user.email}
+    )
+
+    return {
+        "message": "Account created successfully",
+        "token": token,
+        "token_type": "bearer",
+        "user": user.to_dict(),
+    }
 
 
 @router.post("/verify-email")
@@ -230,7 +197,7 @@ async def verify_email(
     user.verification_token_expires = None
     db.add(user)
     await db.flush()
-
+    await db.commit()
     # Generate login token
     token = create_access_token(data={"sub": user.id, "email": user.email})
 
@@ -268,6 +235,7 @@ async def resend_verification(
     user.verification_token_expires = datetime.now(timezone.utc) + timedelta(hours=24)
     db.add(user)
     await db.flush()
+    await db.commit()
 
     try:
         await send_verification_email(user.email, user.verification_token, user.full_name)
@@ -289,17 +257,19 @@ async def login(
     result = await db.execute(select(User).where(User.email == request.email.lower().strip()))
     user = result.scalar_one_or_none()
 
-    if user is None or not verify_password(request.password, user.hashed_password):
+    if user is None:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-        )
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid email or password.",
+    )
 
-    if not user.email_verified:
+    if not verify_password(request.password, user.hashed_password):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Please verify your email before logging in. Check your inbox for the verification link.",
-        )
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid email or password.",
+    )
+
+    
 
     # Check 45-day password expiry
     PASSWORD_MAX_AGE_DAYS = 45
@@ -315,6 +285,7 @@ async def login(
             user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
             db.add(user)
             await db.flush()
+            await db.commit()
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"PASSWORD_EXPIRED|{reset_tok}",
@@ -381,6 +352,8 @@ async def update_profile(
 
     db.add(current_user)
     await db.flush()
+    await db.commit()
+    
 
     logger.info("User profile updated: %s", current_user.email)
 
@@ -412,7 +385,7 @@ async def forgot_password(
     user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
     db.add(user)
     await db.flush()
-
+    await db.commit()
     smtp_configured = bool(SMTP_HOST and SMTP_USER)
 
     if smtp_configured:
@@ -477,6 +450,7 @@ async def reset_password(
     user.reset_token_expires = None
     db.add(user)
     await db.flush()
+    await db.commit()
 
     logger.info("Password reset completed for %s", user.email)
 

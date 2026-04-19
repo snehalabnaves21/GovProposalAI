@@ -4,13 +4,22 @@ import api from '../services/api';
 const AuthContext = createContext(null);
 
 const TOKEN_KEY = 'govproposal_token';
+const USER_KEY = 'govproposal_user';
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
+  // ✅ Load user from localStorage immediately so session survives backend restarts
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem(USER_KEY);
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
   const [loading, setLoading] = useState(true);
 
-  // Restore session on mount
+  // ✅ On mount — validate stored token against backend
   useEffect(() => {
     const restoreSession = async () => {
       const savedToken = localStorage.getItem(TOKEN_KEY);
@@ -22,11 +31,14 @@ export function AuthProvider({ children }) {
         const response = await api.get('/api/auth/me', {
           headers: { Authorization: `Bearer ${savedToken}` },
         });
-        setUser(response.data.user || response.data);
+        const userData = response.data.user || response.data;
+        setUser(userData);
         setToken(savedToken);
+        localStorage.setItem(USER_KEY, JSON.stringify(userData));
       } catch {
-        // Token invalid or expired — clear it
+        // Token invalid/expired — wipe everything
         localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
         setToken(null);
         setUser(null);
       } finally {
@@ -40,55 +52,48 @@ export function AuthProvider({ children }) {
     const response = await api.post('/api/auth/login', { email, password });
     const { token: newToken, user: userData } = response.data;
     localStorage.setItem(TOKEN_KEY, newToken);
+    localStorage.setItem(USER_KEY, JSON.stringify(userData));
     setToken(newToken);
     setUser(userData);
     return userData;
   }, []);
 
-  const register = useCallback(async (email, password, fullName, companyName) => {
-    const response = await api.post('/api/auth/register', {
-      email,
-      password,
-      full_name: fullName,
-      company_name: companyName,
-    });
-    // Registration now requires email verification — don't auto-login
+  const register = useCallback(async (payload) => {
+    const response = await api.post('/api/auth/register', payload);
     return response.data;
   }, []);
 
   const loginWithToken = useCallback((newToken, userData) => {
     localStorage.setItem(TOKEN_KEY, newToken);
+    localStorage.setItem(USER_KEY, JSON.stringify(userData));
     setToken(newToken);
     setUser(userData);
   }, []);
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
     setToken(null);
     setUser(null);
   }, []);
 
+  const updateUser = useCallback((updatedUser) => {
+    setUser(updatedUser);
+    localStorage.setItem(USER_KEY, JSON.stringify(updatedUser));
+  }, []);
+
   const isAuthenticated = !!user && !!token;
 
-  const value = {
-    user,
-    token,
-    loading,
-    isAuthenticated,
-    login,
-    register,
-    loginWithToken,
-    logout,
-  };
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, token, loading, isAuthenticated, login, register, loginWithToken, logout, updateUser }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 }
 

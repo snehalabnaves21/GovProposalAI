@@ -102,6 +102,22 @@ const initialProfile = {
   contact_phone: '', contact_address: '',
 };
 
+const TOKEN_KEY = 'govproposal_token';
+
+// Returns a user-scoped localStorage key so different users never share data
+function getUserScopedKey() {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return 'vendorProfile__guest';
+    // JWT payload is the middle part (base64)
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    const uid = payload.sub || payload.user_id || payload.id || payload.email || 'unknown';
+    return `vendorProfile__${uid}`;
+  } catch {
+    return 'vendorProfile__guest';
+  }
+}
+
 export default function VendorProfile() {
   const [customCert, setCustomCert] = useState('');
   const [showCertInput, setShowCertInput] = useState(false);
@@ -160,7 +176,7 @@ export default function VendorProfile() {
             contact_phone: dbProfile.contact_info?.phone || '',
             contact_address: dbProfile.contact_info?.address || '',
           };
-          const saved = localStorage.getItem('vendorProfile');
+          const saved = localStorage.getItem(getUserScopedKey());
           if (saved) {
             try {
               const local = JSON.parse(saved);
@@ -180,7 +196,7 @@ setLoading(false);
 return;
         }
       } catch { /* fall back to localStorage */ }
-      const saved = localStorage.getItem('vendorProfile');
+      const saved = localStorage.getItem(getUserScopedKey());
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
@@ -468,11 +484,12 @@ const handleImproveAbout = async () => {
     setSuccess('');
     setError('');
     try {
-      localStorage.setItem('vendorProfile', JSON.stringify(profile));
+      localStorage.setItem(getUserScopedKey(), JSON.stringify(profile));
       await api.post('/api/vendor-profile', profile);
       setSuccess('Vendor profile saved successfully. Data will auto-fill in proposals.');
       setEditMode(false);
     } catch {
+      localStorage.setItem(getUserScopedKey(), JSON.stringify(profile));
       setSuccess('Profile saved locally. Data will auto-fill in proposals.');
       setEditMode(false);
     } finally {
@@ -486,7 +503,7 @@ const handleImproveAbout = async () => {
     setSuccess('');
     setError('');
     try {
-      localStorage.setItem('vendorProfile', JSON.stringify(profile));
+      localStorage.setItem(getUserScopedKey(), JSON.stringify(profile));
       await api.post('/api/vendor-profile', profile);
       setSuccess('Vendor profile saved successfully.');
     } catch {

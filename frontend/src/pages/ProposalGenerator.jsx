@@ -60,13 +60,52 @@ const steps = [
   { number: 3, label: 'Sections & Generate', icon: ListBulletIcon },
 ];
 
+const TOKEN_KEY = 'govproposal_token';
+
+function getUserScopedProfileKey() {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return 'vendorProfile__guest';
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    const uid = payload.sub || payload.user_id || payload.id || payload.email || 'unknown';
+    return `vendorProfile__${uid}`;
+  } catch {
+    return 'vendorProfile__guest';
+  }
+}
+
+function parseStoredProfile(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed.naics_codes === 'string') {
+      parsed.naics_codes = parsed.naics_codes.split(',').map((c) => c.trim()).filter(Boolean);
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getLocalVendorProfile() {
+  return parseStoredProfile(localStorage.getItem(getUserScopedProfileKey()))
+    || parseStoredProfile(localStorage.getItem('vendorProfile'));
+}
+
+const hasGeneratedContent = (sections) => {
+  if (!sections || typeof sections !== 'object') return false;
+  return Object.values(sections).some((section) => {
+    const content = typeof section === 'string' ? section : section?.content;
+    return (content || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0;
+  });
+};
+
 export default function ProposalGenerator() {
   const location = useLocation();
   const navigate = useNavigate();
 
   const [currentStep, setCurrentStep] = useState(1);
   const [generating, setGenerating] = useState(false);
-  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
   const [error, setError] = useState('');
 
   // Step 1 — Vendor profile
@@ -147,11 +186,15 @@ export default function ProposalGenerator() {
 
     const loadProfile = async () => {
       setVendorLoading(true);
+      const localProfile = getLocalVendorProfile();
       try {
         // Try fetching from backend API first
         const res = await api.get('/api/vendor-profiles');
         if (res.data?.profiles?.length > 0) {
-          const p = res.data.profiles[0]; // most recent profile
+          const profiles = res.data.profiles;
+          const p = localProfile?.company_name
+            ? profiles.find((profile) => profile.company_name === localProfile.company_name) || profiles[0]
+            : profiles[0]; // most recently updated profile
           const mapped = {
             company_name: p.company_name || '',
             cage_code: p.cage_code || '',
@@ -168,34 +211,26 @@ export default function ProposalGenerator() {
           setVendor((prev) => ({ ...prev, ...mapped }));
           setVendorLoading(false);
 
-          // Also try loading extended fields from localStorage (richer data)
-          const saved = localStorage.getItem('vendorProfile');
-          if (saved) {
-            try {
-              const parsed = JSON.parse(saved);
-              if (typeof parsed.naics_codes === 'string') {
-                parsed.naics_codes = parsed.naics_codes.split(',').map((c) => c.trim()).filter(Boolean);
-              }
-              // Merge extended fields that backend doesn't store
-              setVendor((prev) => ({
-                ...prev,
-                ein_tin: parsed.ein_tin || prev.ein_tin,
-                about_company: parsed.about_company || prev.about_company,
-                capability_statement: parsed.capability_statement || prev.capability_statement,
-                organizational_type: parsed.organizational_type || prev.organizational_type,
-                years_in_business: parsed.years_in_business || prev.years_in_business,
-                number_of_employees: parsed.number_of_employees || prev.number_of_employees,
-                annual_revenue: parsed.annual_revenue || prev.annual_revenue,
-                security_clearance_level: parsed.security_clearance_level || prev.security_clearance_level,
-                business_classifications: parsed.business_classifications || prev.business_classifications,
-                certifications: parsed.certifications || prev.certifications,
-                contract_vehicles: parsed.contract_vehicles || prev.contract_vehicles,
-                management_team: parsed.management_team || prev.management_team,
-                executive_team: parsed.executive_team || prev.executive_team,
-                past_performances: parsed.past_performances || prev.past_performances,
-                capability_examples: parsed.capability_examples || prev.capability_examples,
-              }));
-            } catch { /* ignore */ }
+          // Also merge extended local fields only when they belong to this same company.
+          if (localProfile?.company_name === p.company_name) {
+            setVendor((prev) => ({
+              ...prev,
+              ein_tin: localProfile.ein_tin || prev.ein_tin,
+              about_company: localProfile.about_company || prev.about_company,
+              capability_statement: localProfile.capability_statement || prev.capability_statement,
+              organizational_type: localProfile.organizational_type || prev.organizational_type,
+              years_in_business: localProfile.years_in_business || prev.years_in_business,
+              number_of_employees: localProfile.number_of_employees || prev.number_of_employees,
+              annual_revenue: localProfile.annual_revenue || prev.annual_revenue,
+              security_clearance_level: localProfile.security_clearance_level || prev.security_clearance_level,
+              business_classifications: localProfile.business_classifications || prev.business_classifications,
+              certifications: localProfile.certifications || prev.certifications,
+              contract_vehicles: localProfile.contract_vehicles || prev.contract_vehicles,
+              management_team: localProfile.management_team || prev.management_team,
+              executive_team: localProfile.executive_team || prev.executive_team,
+              past_performances: localProfile.past_performances || prev.past_performances,
+              capability_examples: localProfile.capability_examples || prev.capability_examples,
+            }));
           }
           return;
         }
@@ -204,15 +239,8 @@ export default function ProposalGenerator() {
       }
 
       // Fallback: load from localStorage
-      const saved = localStorage.getItem('vendorProfile');
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (typeof parsed.naics_codes === 'string') {
-            parsed.naics_codes = parsed.naics_codes.split(',').map((c) => c.trim()).filter(Boolean);
-          }
-          setVendor((prev) => ({ ...prev, ...parsed }));
-        } catch { /* ignore */ }
+      if (localProfile) {
+        setVendor((prev) => ({ ...prev, ...localProfile }));
       }
       setVendorLoading(false);
     };
@@ -360,21 +388,37 @@ export default function ProposalGenerator() {
       };
 
       const response = await api.post('/api/generate-proposal', payload);
+      if (!hasGeneratedContent(response.data?.sections)) {
+        localStorage.removeItem('lastGeneratedProposal');
+        setError('Proposal generation completed, but no section content was returned. Please try again, or check the AI generation service/API quota.');
+        return;
+      }
+
+      const editorState = {
+        proposal: response.data,
+        opportunity,
+        vendor,
+      };
+      localStorage.setItem('lastGeneratedProposal', JSON.stringify(editorState));
 
       // Navigate to the editor with the generated proposal
       navigate('/proposal-editor', {
-        state: {
-          proposal: response.data,
-          opportunity,
-          vendor,
-        },
+        state: editorState,
       });
     } catch (err) {
-      setError(
-        err.response?.data?.detail ||
-          err.message ||
-          'Failed to generate proposal. Please try again.'
-      );
+      const raw = err.response?.data?.detail || err.message || '';
+      // Sanitize raw API error blobs (e.g. Gemini quota exceeded JSON)
+      let friendlyError = raw;
+      if (raw.length > 200 || /quota|generativelanguage|429|billing/i.test(raw)) {
+        if (/429|quota.*exceeded|exceeded.*quota/i.test(raw)) {
+          friendlyError = 'AI quota exceeded — the generation service is temporarily rate-limited. Please wait a moment and try again, or check your API plan.';
+        } else if (/5\d\d|server error|internal/i.test(raw)) {
+          friendlyError = 'The generation service returned an error. Please try again in a moment.';
+        } else {
+          friendlyError = 'Failed to generate proposal. Please try again.';
+        }
+      }
+      setError(friendlyError || 'Failed to generate proposal. Please try again.');
     } finally {
       setGenerating(false);
     }
@@ -464,14 +508,6 @@ export default function ProposalGenerator() {
           })}
         </div>
       </div>
-
-      {/* Error */}
-      {error && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-start gap-3">
-          <ExclamationTriangleIcon className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-          <p className="text-sm text-red-700">{error}</p>
-        </div>
-      )}
 
       {/* Step 1: Vendor Profile */}
       {currentStep === 1 && (
@@ -737,7 +773,7 @@ export default function ProposalGenerator() {
                   type="text"
                   value={opportunity.agency}
                   onChange={(e) => handleOpportunityChange('agency', e.target.value)}
-                  placeholder="e.g., Department of Defense"
+                  placeholder="e.g., Department of Defence"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue/30 focus:border-blue transition-all"
                 />
               </div>
@@ -749,7 +785,7 @@ export default function ProposalGenerator() {
                   type="text"
                   value={opportunity.contracting_office}
                   onChange={(e) => handleOpportunityChange('contracting_office', e.target.value)}
-                  placeholder="e.g., Defense Information Systems Agency"
+                  placeholder="e.g., Defence Information Systems Agency"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue/30 focus:border-blue transition-all"
                 />
               </div>
@@ -1054,28 +1090,21 @@ export default function ProposalGenerator() {
             </div>
           </div>
 
-          {/* Disclaimer */}
-          <div className="bg-amber-50/50 border border-amber-200/60 rounded-xl p-4 mb-4">
-            <p className="text-xs text-gray-500 leading-relaxed mb-3">
-              <span className="font-semibold text-gray-600">Disclaimer:</span> This application generates proposal documents based on user inputs and available data sources. All outputs are automated and may not reflect complete or fully verified information. By generating this proposal, you acknowledge that you are solely responsible for reviewing, verifying, and ensuring the accuracy and suitability of all content prior to submission. The application and its providers shall not be liable for any damages, errors, omissions, or outcomes arising from use of the generated content. All use is at your sole risk and discretion.
-            </p>
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={disclaimerAccepted}
-                onChange={(e) => setDisclaimerAccepted(e.target.checked)}
-                className="mt-0.5 w-4 h-4 rounded border-gray-300 text-accent focus:ring-accent cursor-pointer"
-              />
-              <span className="text-xs text-gray-600 font-medium">
-                I have read and agree to the above disclaimer. I accept full responsibility for any decisions, submissions, or actions taken based on the generated output.
-              </span>
-            </label>
-          </div>
+          {/* Error (shown here, right above Generate, only when generation fails) */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex items-start gap-3">
+              <ExclamationTriangleIcon className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-red-700 mb-0.5">Generation failed</p>
+                <p className="text-sm text-red-600">{error}</p>
+              </div>
+            </div>
+          )}
 
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={generating || selectedSections.length === 0 || !disclaimerAccepted}
+            disabled={generating || selectedSections.length === 0}
             className="w-full bg-accent hover:bg-accent-dark text-white py-4 rounded-xl font-semibold text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-md hover:shadow-lg cursor-pointer"
           >
             <SparklesIcon className="w-5 h-5" />

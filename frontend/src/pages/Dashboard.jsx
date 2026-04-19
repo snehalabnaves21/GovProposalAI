@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+
 import {
   DocumentTextIcon,
   ClockIcon,
@@ -75,7 +77,7 @@ export default function Dashboard() {
   };
 
   const userName = user?.first_name || (user?.full_name ? user.full_name.split(' ')[0] : '');
-
+  const navigate = useNavigate();
   return (
     <div className="max-w-7xl mx-auto">
       {/* Page Header */}
@@ -92,7 +94,8 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow">
           <div className="flex items-start justify-between">
-            <div>
+            <div onClick={() => navigate('/proposals')}
+    className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow cursor-pointer">
               <p className="text-sm font-medium text-gray-500">Total Proposals</p>
               <p className="text-3xl font-bold text-navy mt-2">
                 {loading ? <span className="inline-block w-8 h-8 bg-gray-100 rounded animate-pulse" /> : totalProposals}
@@ -110,7 +113,8 @@ export default function Dashboard() {
 
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow">
           <div className="flex items-start justify-between">
-            <div>
+            <div onClick={() => navigate('/proposals?status=in_progress')}
+    className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow cursor-pointer">
               <p className="text-sm font-medium text-gray-500">In Progress</p>
               <p className="text-3xl font-bold text-navy mt-2">
                 {loading ? <span className="inline-block w-8 h-8 bg-gray-100 rounded animate-pulse" /> : pendingProposals}
@@ -128,7 +132,8 @@ export default function Dashboard() {
 
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow">
           <div className="flex items-start justify-between">
-            <div>
+            <div onClick={() => navigate('/proposals?status=completed')}
+    className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow cursor-pointer">
               <p className="text-sm font-medium text-gray-500">Completed</p>
               <p className="text-3xl font-bold text-navy mt-2">
                 {loading ? <span className="inline-block w-8 h-8 bg-gray-100 rounded animate-pulse" /> : completedProposals}

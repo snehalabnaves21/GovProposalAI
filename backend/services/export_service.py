@@ -7,7 +7,10 @@ import base64
 import io
 import logging
 import re
+import urllib.parse
+import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from html import unescape as html_unescape
 
@@ -47,6 +50,17 @@ SUB_HEADER_BG = "059669"
 LIGHT_GRAY_BG = "F3F4F6"
 BORDER_COLOR = RGBColor(0xD1, 0xD5, 0xDB)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+UPLOADS_DIR = Path(__file__).resolve().parents[1] / "data" / "uploads"
+
+
+def _normalize_hex_color(value: str, fallback: str) -> str:
+    """Return a ReportLab-friendly hex color string."""
+    if not value:
+        return fallback
+    value = value.strip()
+    if re.match(r"^#?[0-9A-Fa-f]{6}$", value):
+        return value if value.startswith("#") else f"#{value}"
+    return fallback
 
 
 def _set_cell_shading(cell, color_hex: str):
@@ -969,6 +983,13 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         proposal_title = proposal.get("proposal_title", "Government Proposal")
         vendor_name = proposal.get("vendor_name", "")
         sections = proposal.get("sections", {})
+        template = proposal.get("template") or {}
+        accent_hex = _normalize_hex_color(template.get("accent", ""), "#10B981")
+        heading_hex = _normalize_hex_color(template.get("headingColor", ""), "#1B2A4A")
+        styles["ProposalTitle"].textColor = colors.HexColor(heading_hex)
+        styles["ProposalSubtitle"].textColor = colors.HexColor(accent_hex)
+        styles["SectionHeading"].textColor = colors.HexColor(heading_hex)
+        styles["SubHeading"].textColor = colors.HexColor(accent_hex)
 
         # Extended metadata for structured cover page
         meta = proposal.get("metadata") or {}
@@ -1024,7 +1045,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         )]]
         banner = RLTable(banner_data, colWidths=[7 * inch], rowHeights=[0.8 * inch])
         banner.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1B2A4A")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(heading_hex)),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("TOPPADDING", (0, 0), (-1, -1), 16),
@@ -1041,7 +1062,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         )]]
         accent_bar = RLTable(accent_data, colWidths=[7 * inch], rowHeights=[0.4 * inch])
         accent_bar.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#10B981")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
@@ -1141,7 +1162,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         # Bottom accent line
         bottom = RLTable([[""]], colWidths=[7 * inch], rowHeights=[3])
         bottom.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#10B981")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
         ]))
         story.append(bottom)
 
@@ -1152,6 +1173,13 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             ParagraphStyle("CoverFooterNote", parent=styles["Normal"],
                            fontSize=9, textColor=colors.HexColor("#6B7280"),
                            alignment=1, fontName="Helvetica")))
+
+        floating_images = proposal.get("floating_images") or []
+        if floating_images:
+            story.append(Spacer(1, 0.2 * inch))
+            for image in floating_images[:6]:
+                _add_pdf_image(story, image.get("url", ""), styles)
+
         story.append(PageBreak())
 
         # --- Table of Contents with Volume grouping + page numbers ---
@@ -1160,7 +1188,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         # Accent line under TOC heading
         toc_line = RLTable([[""]], colWidths=[6.5 * inch], rowHeights=[2])
         toc_line.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#10B981")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
         ]))
         story.append(toc_line)
         story.append(Spacer(1, 0.15 * inch))
@@ -1195,7 +1223,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
 
         vol_heading_style = ParagraphStyle(
             "VolHeading", parent=styles["Normal"],
-            fontSize=11, textColor=colors.HexColor("#1B2A4A"),
+            fontSize=11, textColor=colors.HexColor(heading_hex),
             fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4,
         )
         page_style = ParagraphStyle(
@@ -1255,7 +1283,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             # Accent line under heading
             line = RLTable([[""]], colWidths=[6.5 * inch], rowHeights=[2])
             line.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#10B981")),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
             ]))
             story.append(line)
             story.append(Spacer(1, 0.15 * inch))
@@ -1362,6 +1390,11 @@ def _render_pdf_content(story, parsed, styles, section_key=""):
             i += 1
             continue
 
+        if ptype == 'image':
+            _add_pdf_image(story, para.get('src', ''), styles)
+            i += 1
+            continue
+
         # Detect table blocks
         if '|' in ptext and ptext.count('|') >= 2:
             table_lines = [ptext]
@@ -1423,6 +1456,71 @@ def _add_pdf_table(story, headers, rows, styles):
 
     table.setStyle(TableStyle(table_style))
     story.append(table)
+
+
+def _load_image_bytes(src: str) -> Optional[bytes]:
+    """Load an image from a data URL, uploaded asset path, local file, or public URL."""
+    if not src:
+        return None
+
+    if src.startswith("data:image"):
+        try:
+            _, b64data = src.split(",", 1)
+            return base64.b64decode(b64data)
+        except Exception as exc:
+            logger.warning("Failed to decode image data URL: %s", exc)
+            return None
+
+    parsed = urllib.parse.urlparse(src)
+    asset_path = parsed.path if parsed.scheme else src
+    if asset_path.startswith("/api/uploads/"):
+        parts = [p for p in asset_path.split("/") if p]
+        if len(parts) >= 4:
+            file_path = UPLOADS_DIR / parts[-2] / parts[-1]
+            try:
+                if file_path.exists():
+                    return file_path.read_bytes()
+            except Exception as exc:
+                logger.warning("Failed to read uploaded image %s: %s", file_path, exc)
+
+    if parsed.scheme in {"http", "https"}:
+        try:
+            with urllib.request.urlopen(src, timeout=8) as response:
+                return response.read(8 * 1024 * 1024)
+        except Exception as exc:
+            logger.warning("Failed to fetch image %s: %s", src, exc)
+            return None
+
+    return None
+
+
+def _add_pdf_image(story, src: str, styles):
+    """Add an HTML image to the PDF story while preserving aspect ratio."""
+    image_bytes = _load_image_bytes(src)
+    if not image_bytes:
+        return
+
+    try:
+        from PIL import Image as PILImage
+        from reportlab.platypus import Image as RLImage
+
+        pil_image = PILImage.open(io.BytesIO(image_bytes))
+        width_px, height_px = pil_image.size
+        if width_px <= 0 or height_px <= 0:
+            return
+
+        max_w = 5.8 * inch
+        max_h = 3.2 * inch
+        width_pt = width_px / 96.0 * inch
+        height_pt = height_px / 96.0 * inch
+        scale = min(max_w / width_pt, max_h / height_pt, 1.0)
+
+        img = RLImage(io.BytesIO(image_bytes), width=width_pt * scale, height=height_pt * scale)
+        img.hAlign = "CENTER"
+        story.append(img)
+        story.append(Spacer(1, 8))
+    except Exception as exc:
+        logger.warning("Failed to render image in PDF: %s", exc)
 
 
 def _add_html_table_to_pdf(story, headers: List[str], rows: List[Dict], styles):
@@ -1562,14 +1660,23 @@ def _html_to_paragraphs(html_content: str) -> list:
 
     paragraphs = []
 
-    # First, extract and replace HTML tables with placeholders
+    # First, extract and replace HTML tables/images with placeholders
     tables = _parse_html_tables(html_content)
+    images = []
     text = html_content
     table_idx = 0
     table_pattern = re.compile(r'<table[^>]*>.*?</table>', re.DOTALL | re.IGNORECASE)
     for match in table_pattern.finditer(html_content):
         text = text.replace(match.group(0), f'\n__HTML_TABLE_{table_idx}__\n', 1)
         table_idx += 1
+
+    image_pattern = re.compile(r'<img\b[^>]*\bsrc=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+    image_idx = 0
+    for match in list(image_pattern.finditer(text)):
+        src = html_unescape(match.group(1).strip())
+        images.append({'src': src})
+        text = text.replace(match.group(0), f'\n__HTML_IMAGE_{image_idx}__\n', 1)
+        image_idx += 1
 
     text = re.sub(r'<br\s*/?>', '\n', text)
     text = re.sub(r'<(?:strong|b)>(.*?)</(?:strong|b)>', r'**\1**', text, flags=re.DOTALL)
@@ -1595,6 +1702,10 @@ def _html_to_paragraphs(html_content: str) -> list:
             idx = int(re.match(r'^__HTML_TABLE_(\d+)__$', line).group(1))
             if idx < len(tables):
                 paragraphs.append({'type': 'html_table', 'text': '', 'table_data': tables[idx]})
+        elif re.match(r'^__HTML_IMAGE_(\d+)__$', line):
+            idx = int(re.match(r'^__HTML_IMAGE_(\d+)__$', line).group(1))
+            if idx < len(images):
+                paragraphs.append({'type': 'image', 'text': '', 'src': images[idx]['src']})
         elif line.startswith('### '):
             paragraphs.append({'type': 'h3', 'text': line[4:].strip()})
         elif line.startswith('## '):

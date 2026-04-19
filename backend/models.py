@@ -110,6 +110,8 @@ class ExportRequest(BaseModel):
     )
     metadata: Optional[Dict] = Field(None, description="Extended metadata for cover page (agency, POC, etc.)")
     company_logo: Optional[str] = Field(None, description="Base64-encoded company logo image (data URL)")
+    template: Optional[Dict] = Field(None, description="Selected preview/export template styling")
+    floating_images: Optional[List[Dict]] = Field(None, description="Draggable preview images to include in PDF export")
     volume_assignments: Optional[Dict[str, List[str]]] = Field(
         None,
         description="Map of volume name to list of section keys. E.g. {'Volume I - Administrative': ['cover_page', 'executive_summary']}"

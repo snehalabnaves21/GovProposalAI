@@ -22,7 +22,7 @@ const PASSWORD_RULES = [
 
 export default function Register() {
   const navigate = useNavigate();
-  const { loginWithToken } = useAuth();
+  const { loginWithToken, register } = useAuth();
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -42,7 +42,6 @@ export default function Register() {
   const [resendMessage, setResendMessage] = useState('');
   const [agreedToTerms, setAgreedToTerms] = useState(false);
 
-  // Password strength checks
   const passwordChecks = useMemo(
     () => PASSWORD_RULES.map((rule) => ({ ...rule, passed: rule.test(password) })),
     [password]
@@ -57,16 +56,15 @@ export default function Register() {
       setError('Passwords do not match.');
       return;
     }
-
     if (!allPasswordChecksPassed) {
       setError('Password does not meet all security requirements.');
       return;
     }
 
     setLoading(true);
-
     try {
-      const res = await api.post('/api/auth/register', {
+      // ✅ Pass full payload object — backend saves to DB, returns token directly (no email verification)
+      const data = await register({
         email,
         password,
         first_name: firstName,
@@ -75,12 +73,15 @@ export default function Register() {
         mobile_number: mobileNumber,
         landline_number: landlineNumber,
       });
-      if (res.data.requires_verification === false && res.data.token) {
-        // Auto-verified (no SMTP) — log in directly
-        loginWithToken(res.data.token, res.data.user);
+
+      if (data.token) {
+        // ✅ Backend returned token — auto-login and go to vendor profile setup
+        loginWithToken(data.token, data.user);
         navigate('/vendor-profile');
         return;
       }
+
+      // If backend requires email verification (requires_verification: true)
       setRegisteredEmail(email);
       setRegistered(true);
     } catch (err) {
@@ -107,7 +108,7 @@ export default function Register() {
     }
   };
 
-  // Registration success — show verification message
+  // Registration success screen (only shows if backend requires email verification)
   if (registered) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center px-4 py-8">
@@ -122,20 +123,16 @@ export default function Register() {
               GovProposal <span className="text-accent">AI</span>
             </h1>
           </div>
-
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 text-center">
             <div className="w-16 h-16 bg-accent/10 rounded-full flex items-center justify-center mx-auto mb-5">
               <EnvelopeIcon className="w-8 h-8 text-accent" />
             </div>
             <h2 className="text-xl font-semibold text-navy mb-3">Check Your Email</h2>
-            <p className="text-sm text-gray-500 mb-2">
-              We sent a verification link to:
-            </p>
+            <p className="text-sm text-gray-500 mb-2">We sent a verification link to:</p>
             <p className="text-sm font-semibold text-navy mb-5">{registeredEmail}</p>
             <p className="text-sm text-gray-500 mb-6">
-              Click the link in the email to verify your account and start creating proposals. The link expires in 24 hours.
+              Click the link in the email to verify your account. The link expires in 24 hours.
             </p>
-
             <div className="border-t border-gray-100 pt-5 space-y-3">
               <p className="text-xs text-gray-400">Didn't receive the email? Check your spam folder or</p>
               <button
@@ -149,12 +146,8 @@ export default function Register() {
                 <p className="text-xs text-accent font-medium">{resendMessage}</p>
               )}
             </div>
-
             <div className="mt-6">
-              <Link
-                to="/login"
-                className="text-sm font-medium text-blue hover:text-blue-light no-underline"
-              >
+              <Link to="/login" className="text-sm font-medium text-blue hover:text-blue-light no-underline">
                 Back to Sign In
               </Link>
             </div>
@@ -177,18 +170,13 @@ export default function Register() {
           <h1 className="text-2xl font-bold text-navy">
             GovProposal <span className="text-accent">AI</span>
           </h1>
-          <p className="text-gray-500 text-sm mt-1">
-            AI-powered government proposal generation
-          </p>
+          <p className="text-gray-500 text-sm mt-1">AI-powered government proposal generation</p>
         </div>
 
         {/* Register Card */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
-          <h2 className="text-xl font-semibold text-navy mb-6 text-center">
-            Create your account
-          </h2>
+          <h2 className="text-xl font-semibold text-navy mb-6 text-center">Create your account</h2>
 
-          {/* Error */}
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-5 flex items-start gap-2">
               <ExclamationTriangleIcon className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -197,6 +185,7 @@ export default function Register() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Name row */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
@@ -206,7 +195,7 @@ export default function Register() {
                   type="text"
                   value={firstName}
                   onChange={(e) => setFirstName(e.target.value)}
-                  placeholder="John"
+                  placeholder="Jane"
                   required
                   autoComplete="given-name"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue/30 focus:border-blue transition-all"
@@ -228,20 +217,23 @@ export default function Register() {
               </div>
             </div>
 
+            {/* Company */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                Company Name
+                Company Name <span className="text-red-400">*</span>
               </label>
               <input
                 type="text"
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
-                placeholder="Your Company Inc."
+                placeholder="Acme Corp"
+                required
                 autoComplete="organization"
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue/30 focus:border-blue transition-all"
               />
             </div>
 
+            {/* Email */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
                 Email Address <span className="text-red-400">*</span>
@@ -257,6 +249,7 @@ export default function Register() {
               />
             </div>
 
+            {/* Phone row */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
@@ -273,9 +266,7 @@ export default function Register() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  Landline Number
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Landline Number</label>
                 <input
                   type="tel"
                   value={landlineNumber}
@@ -287,6 +278,7 @@ export default function Register() {
               </div>
             </div>
 
+            {/* Password */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
                 Password <span className="text-red-400">*</span>
@@ -307,14 +299,9 @@ export default function Register() {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
                   tabIndex={-1}
                 >
-                  {showPassword ? (
-                    <EyeSlashIcon className="w-5 h-5" />
-                  ) : (
-                    <EyeIcon className="w-5 h-5" />
-                  )}
+                  {showPassword ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
                 </button>
               </div>
-              {/* Password strength indicator */}
               {password.length > 0 && (
                 <div className="mt-2 space-y-1">
                   {passwordChecks.map((check) => (
@@ -324,11 +311,7 @@ export default function Register() {
                       ) : (
                         <XCircleIcon className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
                       )}
-                      <span
-                        className={`text-xs ${
-                          check.passed ? 'text-accent' : 'text-red-400'
-                        }`}
-                      >
+                      <span className={`text-xs ${check.passed ? 'text-accent' : 'text-red-400'}`}>
                         {check.label}
                       </span>
                     </div>
@@ -337,6 +320,7 @@ export default function Register() {
               )}
             </div>
 
+            {/* Confirm Password */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
                 Confirm Password <span className="text-red-400">*</span>
@@ -357,27 +341,22 @@ export default function Register() {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
                   tabIndex={-1}
                 >
-                  {showConfirmPassword ? (
-                    <EyeSlashIcon className="w-5 h-5" />
-                  ) : (
-                    <EyeIcon className="w-5 h-5" />
-                  )}
+                  {showConfirmPassword ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
                 </button>
               </div>
               {confirmPassword.length > 0 && password !== confirmPassword && (
                 <p className="text-xs text-red-400 mt-1 flex items-center gap-1">
-                  <XCircleIcon className="w-3.5 h-3.5" />
-                  Passwords do not match
+                  <XCircleIcon className="w-3.5 h-3.5" /> Passwords do not match
                 </p>
               )}
               {confirmPassword.length > 0 && password === confirmPassword && (
                 <p className="text-xs text-accent mt-1 flex items-center gap-1">
-                  <CheckCircleIcon className="w-3.5 h-3.5" />
-                  Passwords match
+                  <CheckCircleIcon className="w-3.5 h-3.5" /> Passwords match
                 </p>
               )}
             </div>
 
+            {/* Terms */}
             <div className="flex items-start gap-2.5">
               <input
                 type="checkbox"
@@ -405,24 +384,9 @@ export default function Register() {
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
-                  <svg
-                    className="animate-spin w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                    />
+                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
                   Creating account...
                 </span>
@@ -434,10 +398,7 @@ export default function Register() {
 
           <p className="text-center text-sm text-gray-500 mt-6">
             Already have an account?{' '}
-            <Link
-              to="/login"
-              className="font-medium text-blue hover:text-blue-light no-underline"
-            >
+            <Link to="/login" className="font-medium text-blue hover:text-blue-light no-underline">
               Sign in
             </Link>
           </p>

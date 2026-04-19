@@ -2,7 +2,6 @@ import axios from "axios";
 
 const TOKEN_KEY = "govproposal_token";
 
-// ✅ Use environment variable (with fallback for safety)
 const API_URL =
   import.meta.env.VITE_API_URL || "https://govproposalai-3.onrender.com";
 
@@ -14,21 +13,20 @@ const api = axios.create({
   timeout: 120000,
 });
 
-// ✅ Request interceptor (attach token)
+// ✅ Attach token to every request
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem(TOKEN_KEY);
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
-
     console.log(`[API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
     return config;
   },
   (error) => Promise.reject(error)
 );
 
-// ✅ Response interceptor (handle errors)
+// ✅ Handle 401 globally
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -40,9 +38,9 @@ api.interceptors.response.use(
 
     console.error(`[API Error] ${message}`);
 
-    // 🔴 Handle unauthorized
     if (error.response?.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem("govproposal_user");
 
       if (
         !window.location.pathname.includes("/login") &&

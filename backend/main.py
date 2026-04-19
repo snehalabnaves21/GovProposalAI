@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+print("GEMINI KEY:", os.getenv("GEMINI_API_KEY"))
 
 from models import (
     VendorProfile,
@@ -718,7 +719,7 @@ async def list_vendor_profiles(
         result = await db.execute(
             select(VendorProfileDB)
             .where(VendorProfileDB.user_id == current_user.id)
-            .order_by(VendorProfileDB.created_at.desc())
+            .order_by(VendorProfileDB.updated_at.desc(), VendorProfileDB.created_at.desc())
         )
         profiles = result.scalars().all()
 
@@ -1011,19 +1012,26 @@ async def generate_section(
 
         import re
 
-        # ✅ Extract ONLY company content (remove instructions)
+        # Only use the local fallback for prompts that explicitly provide source content.
+        # Proposal-section prompts do not have a Content/Make it block; returning the
+        # prompt itself would overwrite proposal sections with instructions.
         match = re.search(
-    r'Content:\s*(.*?)\s*Make it:',
-    prompt,
-    re.DOTALL
-)
+            r'Content:\s*(.*?)\s*Make it:',
+            prompt,
+            re.DOTALL,
+        )
 
-        if match:
-            cleaned = match.group(1).strip()
-        else:
-            cleaned = prompt
+        if not match:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "AI section generation failed. Please check the AI service/API quota "
+                    "and try AI Rewrite again."
+                ),
+            )
 
-        # ✅ Summarize
+        cleaned = match.group(1).strip()
+
         sentences = re.split(r'(?<=[.!?])\s+', cleaned)
 
         summary = []
@@ -1647,6 +1655,8 @@ async def export_docx(
             },
             "metadata": request.metadata or {},
             "company_logo": request.company_logo or "",
+            "template": request.template or {},
+            "floating_images": request.floating_images or [],
             "volume_assignments": request.volume_assignments or {},
         }
 
@@ -1706,6 +1716,8 @@ async def export_pdf(
             },
             "metadata": request.metadata or {},
             "company_logo": request.company_logo or "",
+            "template": request.template or {},
+            "floating_images": request.floating_images or [],
             "volume_assignments": request.volume_assignments or {},
         }
 
@@ -1950,6 +1962,9 @@ async def payment_config():
 # ============================================================
 
 UPLOADS_DIR = DATA_DIR / "uploads"
+from fastapi.staticfiles import StaticFiles
+
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 from fastapi import UploadFile, File
@@ -1982,20 +1997,18 @@ async def upload_image(
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    image_url = f"/api/uploads/{current_user.id}/{unique_name}"
+    image_url = f"/uploads/{current_user.id}/{unique_name}"
     logger.info("Image uploaded by user %s: %s", current_user.id, unique_name)
 
     return {"url": image_url, "filename": unique_name, "size": len(contents)}
 
 
-@app.get("/api/uploads/{user_id}/{filename}")
-async def serve_upload(user_id: int, filename: str):
-    """Serve uploaded images."""
-    from fastapi.responses import FileResponse as FR
-    file_path = UPLOADS_DIR / str(user_id) / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FR(str(file_path))
+#@app.get("/api/uploads/{user_id}/{filename}")
+#async def serve_upload(user_id: int, filename: str):
+ ##  from fastapi.responses import FileResponse as FR
+   # file_path = UPLOADS_DIR / str(user_id) / filename
+    ##   raise HTTPException(status_code=404, detail="Image not found")
+    #return FR(str(file_path))
 
 
 @app.delete("/api/upload-image/{filename}")
