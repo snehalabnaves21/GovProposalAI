@@ -95,8 +95,14 @@ function getLocalVendorProfile() {
 const hasGeneratedContent = (sections) => {
   if (!sections || typeof sections !== 'object') return false;
   return Object.values(sections).some((section) => {
-    const content = typeof section === 'string' ? section : section?.content;
-    return (content || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0;
+    // section can be a plain string OR an object with a .content property
+    let content = '';
+    if (typeof section === 'string') {
+      content = section;
+    } else if (section && typeof section === 'object') {
+      content = section.content || section.text || '';
+    }
+    return content.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0;
   });
 };
 

@@ -413,9 +413,11 @@ const resolveAssetUrl = (url) => {
 
 const hasSectionContent = (sections) => {
   if (!sections || typeof sections !== 'object') return false;
-  return Object.values(sections).some((content) =>
-    (content || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0
-  );
+  return Object.values(sections).some((content) => {
+    // content here is already extracted as a plain string (see parsed[key] assignment above)
+    return typeof content === 'string' &&
+      content.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim().length > 0;
+  });
 };
 
 const sectionImageHints = {

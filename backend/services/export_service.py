@@ -1232,15 +1232,11 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             canvas.saveState()
             page_w, page_h = letter
 
-            # Dark background for entire page
-            canvas.setFillColor(colors.HexColor("#0F1117"))
-            canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
-
-            # Gold top accent bar
+            # Gold top accent bar only (no full-page background — that covers content text)
             canvas.setFillColor(colors.HexColor("#F5A623"))
             canvas.rect(0, page_h - 4, page_w, 4, fill=1, stroke=0)
 
-            # Footer bar
+            # Footer bar at bottom only
             footer_y = 0.35 * inch
             canvas.setFillColor(colors.HexColor("#1A1D27"))
             canvas.rect(0, 0, page_w, 0.6 * inch, fill=1, stroke=0)
