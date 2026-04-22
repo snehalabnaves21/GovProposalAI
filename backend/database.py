@@ -1,29 +1,28 @@
 """
 Database configuration for GovProposal AI.
-
-Uses SQLAlchemy async engine with aiosqlite (easily swappable to PostgreSQL).
+Uses Supabase PostgreSQL (persistent) instead of SQLite.
 """
 
 import os
-from pathlib import Path
-
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
-# Ensure data directory exists
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"sqlite+aiosqlite:///{DATA_DIR / 'govproposal.db'}",
-)
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set. Add it to your Render environment variables.")
+
+# Supabase/Render provide postgres:// — SQLAlchemy async needs postgresql+asyncpg://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    # For SQLite: allow same connection across threads (safe with async)
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    pool_pre_ping=True,
+    pool_recycle=300,
 )
 
 async_session_factory = async_sessionmaker(
@@ -39,14 +38,7 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncSession:
-    """
-    FastAPI dependency that yields an async database session.
-
-    Usage:
-        @app.get("/endpoint")
-        async def handler(db: AsyncSession = Depends(get_db)):
-            ...
-    """
+    """FastAPI dependency that yields an async database session."""
     async with async_session_factory() as session:
         try:
             yield session

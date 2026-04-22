@@ -1125,6 +1125,17 @@ function PricingTable({ onContentUpdate, contractType = '' }) {
   );
 }
 
+// ─── Helper: call Gemini via your backend ────────────────────────────────────
+async function callGeminiAI(prompt, maxTokens = 1500) {
+  const response = await api.post('/api/proposals/generate-section', {
+    prompt,
+    max_tokens: maxTokens,
+  });
+  const text = response.data?.content || '';
+  if (!text) throw new Error('No response from AI');
+  return text;
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 export default function ProposalEditor() {
   const location = useLocation();
@@ -1180,7 +1191,6 @@ export default function ProposalEditor() {
   const [selectedImageId, setSelectedImageId] = useState(null);
   const [pdfDisclaimerAccepted, setPdfDisclaimerAccepted] = useState(false);
 
-  // ─── Canva templates ────────────────────────────────────────────────────────
   const CANVA_TEMPLATES = {
     classic:   { name: 'Classic Navy',    style: 'solid',    coverBg: 'linear-gradient(160deg,#1e3a5f 0%,#2d5282 100%)',            accent: '#38b2ac', headingColor: '#1e3a5f' },
     executive: { name: 'Executive Dark',  style: 'diagonal', coverBg: 'linear-gradient(160deg,#0f172a 0%,#1e293b 60%,#0f172a 100%)',accent: '#f59e0b', headingColor: '#0f172a' },
@@ -1204,11 +1214,8 @@ export default function ProposalEditor() {
     return false;
   };
 
-  // ─── FIX 1: downloadPDF defined at component scope ──────────────────────────
   const downloadPDF = () => {
     if (!requirePdfDisclaimer()) return;
-
-    // ✅ Must be in preview mode so floating images and charts are rendered
     if (!previewMode) {
       setPreviewMode(true);
       setTimeout(() => {
@@ -1223,7 +1230,7 @@ export default function ProposalEditor() {
             jsPDF: { unit: 'mm', format: 'a4' },
           })
           .save();
-      }, 600); // wait for preview to render
+      }, 600);
       return;
     }
     const element = document.getElementById('proposal-preview');
@@ -1242,55 +1249,41 @@ export default function ProposalEditor() {
       .save();
   };
 
-  // ─── Floating image helpers ──────────────────────────────────────────────────
   const addFloatingImage = async (url) => {
-  try {
-    const res = await fetch(resolveAssetUrl(url));
-    const blob = await res.blob();
+    try {
+      const res = await fetch(resolveAssetUrl(url));
+      const blob = await res.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setFloatingImages(prev => [
+          ...prev,
+          { id: Date.now(), url: reader.result, x: 60, y: 60, width: 200, height: 150 }
+        ]);
+      };
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      console.log("Image fetch failed:", err);
+    }
+  };
 
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setFloatingImages(prev => [
-        ...prev,
-        {
-          id: Date.now(),
-          url: reader.result, // ✅ BASE64 IMAGE
-          x: 60,
-          y: 60,
-          width: 200,
-          height: 150,
-        }
-      ]);
-    };
-
-    reader.readAsDataURL(blob);
-  } catch (err) {
-    console.log("Image fetch failed:", err);
-  }
-};
   const updateFloatingImage = (id, updates) => {
     setFloatingImages(prev => prev.map(img => img.id === id ? { ...img, ...updates } : img));
   };
+
   const removeFloatingImage = (id) => {
     setFloatingImages(prev => prev.filter(img => img.id !== id));
     if (selectedImageId === id) setSelectedImageId(null);
   };
 
-  // ─── Global mouse handlers for floating images ───────────────────────────────
   useEffect(() => {
     const handleMove = (e) => {
       const interaction = imageInteractionRef.current;
       if (!interaction) return;
       if (interaction.type === 'drag') {
-  const dx = e.clientX - interaction.startX;
-  const dy = e.clientY - interaction.startY;
-
-  updateFloatingImage(interaction.id, {
-    x: interaction.origX + dx,
-    y: interaction.origY + dy,
-  });
-}
-else if (interaction.type === 'resize') {
+        const dx = e.clientX - interaction.startX;
+        const dy = e.clientY - interaction.startY;
+        updateFloatingImage(interaction.id, { x: interaction.origX + dx, y: interaction.origY + dy });
+      } else if (interaction.type === 'resize') {
         updateFloatingImage(interaction.id, {
           width: Math.max(60, interaction.origW + e.clientX - interaction.startX),
           height: Math.max(40, interaction.origH + e.clientY - interaction.startY),
@@ -1375,6 +1368,7 @@ else if (interaction.type === 'resize') {
     setShowTemplates(false);
   };
 
+  // ─── handleRegenerateSection — uses Gemini via backend ───────────────────
   const handleRegenerateSection = async (key) => {
     if (regeneratingSection) return;
     setRegeneratingSection(key);
@@ -1404,28 +1398,7 @@ ${contextParts.length > 0 ? `Context from other sections:\n${contextParts.join('
 
 Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), paragraphs (<p>), and bullet lists (<ul><li>). Do not include any preamble, explanation, or markdown — output raw HTML only.`;
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1500,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData?.error?.message || `API error ${response.status}`);
-      }
-
-      const data = await response.json();
-      const generated = data.content
-        ?.filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('') || '';
+      const generated = await callGeminiAI(prompt, 1500);
 
       const plainGenerated = generated.replace(/<[^>]+>/g, '').trim();
       if (
@@ -1446,10 +1419,7 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
       const currentPlain = (sections[key] || '').replace(/<[^>]+>/g, '').trim();
       if (!currentPlain) {
         handleContentChange(key, buildStarterSectionContent(key, {
-          proposalTitle,
-          vendorName,
-          opportunityDetails,
-          vendorData,
+          proposalTitle, vendorName, opportunityDetails, vendorData,
         }));
         setSectionNotices((prev) => ({
           ...prev,
@@ -1477,7 +1447,6 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
     setShowChartPicker(null);
   };
 
-  // ─── Load vendor profile ─────────────────────────────────────────────────────
   useEffect(() => {
     try {
       const saved = localStorage.getItem('vendorProfile');
@@ -1488,7 +1457,6 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
     } catch { /* ignore */ }
   }, []);
 
-  // ─── Load proposal from navigation state, or restore after browser refresh ──
   useEffect(() => {
     let editorState = location.state;
     if (!editorState?.proposal) {
@@ -1539,12 +1507,12 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
       const parsed = {};
       const titles = {};
       for (const [key, value] of Object.entries(sectionContent)) {
-        // ✅ Accept ALL keys the backend returns, not just ones in sectionLabels
-        // (previously unknown keys were silently dropped, causing blank sections)
         parsed[key] = typeof value === 'string' ? value : value?.content || '';
-        titles[key] = typeof value === 'string'
-          ? (sectionLabels[key] || key)
-          : (value?.title || sectionLabels[key] || key);
+        const rawTitle = typeof value === 'string' ? null : value?.title;
+        const cleanTitle = rawTitle && rawTitle !== key && !rawTitle.includes('_')
+          ? rawTitle
+          : null;
+        titles[key] = sectionLabels[key] || cleanTitle || key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
       }
 
       if (!hasSectionContent(parsed)) {
@@ -1567,7 +1535,6 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
     }
   }, [location.state]);
 
-  // ─── Auto-load vendor profile from API ──────────────────────────────────────
   useEffect(() => {
     const loadVendorProfile = async () => {
       try {
@@ -1615,6 +1582,7 @@ Write ONLY the HTML content for this section. Use proper headings (<h3>, <h4>), 
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  // ─── analyzeWinProbability — uses Gemini via backend ─────────────────────
   const analyzeWinProbability = async () => {
     setWinProbLoading(true);
     setWinProbOpen(true);
@@ -1638,26 +1606,10 @@ Sections: ${sectionKeys.filter((k) => !skippedSections.has(k)).length}
 
 ${includedSections}
 
-Return ONLY valid JSON, no markdown.`;
+Return ONLY valid JSON, no markdown, no code fences.`;
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1000,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
+      const text = await callGeminiAI(prompt, 1000);
 
-      if (!response.ok) {
-        throw new Error(`API error ${response.status}`);
-      }
-
-      const data = await response.json();
-      const text = data.content?.filter((b) => b.type === 'text').map((b) => b.text).join('') || '';
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
@@ -1717,10 +1669,8 @@ Return ONLY valid JSON, no markdown.`;
     });
   };
 
-  // ─── FIX 2: handleExport uses the API correctly ──────────────────────────────
   const handleExport = async (format) => {
     if (format === 'pdf' && !requirePdfDisclaimer()) return;
-
     setExporting(format);
     try {
       const sectionKeys = sectionOrder.length > 0 ? sectionOrder : Object.keys(sections);
@@ -1783,7 +1733,6 @@ Return ONLY valid JSON, no markdown.`;
 
   const sectionKeys = sectionOrder.length > 0 ? sectionOrder : Object.keys(sections);
 
-  // Show empty state only if no section keys AND no nav state
   if (sectionKeys.length === 0) {
     return (
       <div className="max-w-4xl mx-auto">
@@ -1825,7 +1774,6 @@ Return ONLY valid JSON, no markdown.`;
           </button>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Preview / Edit toggle */}
           <button
             onClick={() => { setPreviewMode(!previewMode); setShowCustomize(false); }}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer ${
@@ -1835,22 +1783,16 @@ Return ONLY valid JSON, no markdown.`;
             {previewMode ? <><PencilSquareIcon className="w-4 h-4" /> Edit Mode</> : <><EyeIcon className="w-4 h-4" /> Preview</>}
           </button>
 
-          {/* ✅ Add Image always visible — works in both edit and preview mode */}
           <label className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition-all cursor-pointer">
             <PhotoIcon className="w-4 h-4" />Add Image
             <input type="file" accept="image/*" className="hidden" onChange={async (e) => {
               const file = e.target.files?.[0];
               if (!file) return;
-              // Convert to base64 immediately so it shows in preview + exports
               const reader = new FileReader();
               reader.onloadend = () => {
                 setFloatingImages(prev => [...prev, {
-                  id: Date.now(),
-                  url: reader.result,
-                  x: 60, y: 60,
-                  width: 200, height: 150,
+                  id: Date.now(), url: reader.result, x: 60, y: 60, width: 200, height: 150,
                 }]);
-                // Switch to preview so the image is visible and draggable
                 if (!previewMode) setPreviewMode(true);
               };
               reader.readAsDataURL(file);
@@ -1875,7 +1817,6 @@ Return ONLY valid JSON, no markdown.`;
             </>
           )}
 
-          {/* Share */}
           <div className="relative">
             <button
               onClick={() => { setShowShareMenu(!showShareMenu); if (!showShareMenu) fetchShareLinks(); }}
@@ -1923,7 +1864,6 @@ Return ONLY valid JSON, no markdown.`;
             )}
           </div>
 
-          {/* Export PDF — FIX: calls downloadPDF (component scope) */}
           <button
             onClick={downloadPDF}
             disabled={!!exporting}
@@ -2193,7 +2133,6 @@ Return ONLY valid JSON, no markdown.`;
         {/* ─── Main Content Area ────────────────────────────────────────────────── */}
         <div className="flex-1 p-6 lg:p-8 overflow-y-auto max-h-[calc(100vh-7.5rem)]">
           {previewMode ? (
-            /* ─── PREVIEW MODE ──────────────────────────────────────────────── */
             <div className="max-w-4xl mx-auto">
               {showCanvaTemplates && (
                 <div className="bg-white rounded-xl shadow-lg border border-gray-100 p-6 mb-4">
@@ -2281,7 +2220,6 @@ Return ONLY valid JSON, no markdown.`;
                 </div>
               )}
 
-              {/* ─── FIX: id="proposal-preview" on the actual document div ── */}
               <div
                 id="proposal-preview"
                 ref={previewRef}
@@ -2289,120 +2227,76 @@ Return ONLY valid JSON, no markdown.`;
                 style={{ fontFamily: previewFont, minHeight: '900px' }}
                 onClick={() => setSelectedImageId(null)}
               >
-                {/* DRAFT watermark */}
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10" style={{ overflow: 'hidden' }}>
                   <span className="text-gray-200 font-extrabold uppercase select-none" style={{ fontSize: '120px', transform: 'rotate(-35deg)', letterSpacing: '20px', opacity: 0.12 }}>
                     DRAFT
                   </span>
                 </div>
 
-                {/* Floating images */}
                 {floatingImages.map((img) => (
                   <div
                     key={img.id}
                     style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        transform: `translate(${Math.max(0, img.x)}px, ${Math.max(0, img.y)}px)`, // FIX: prevent going outside
-        width: img.width || 200, // FIX: default size
-        height: img.height || 150,
-        zIndex: selectedImageId === img.id ? 200 : 150, // FIX: above watermark
-        cursor: 'move'
-      }}
+                      position: 'absolute', top: 0, left: 0,
+                      transform: `translate(${Math.max(0, img.x)}px, ${Math.max(0, img.y)}px)`,
+                      width: img.width || 200, height: img.height || 150,
+                      zIndex: selectedImageId === img.id ? 200 : 150, cursor: 'move'
+                    }}
                     onMouseDown={(e) => {
-        e.stopPropagation();
-        setSelectedImageId(img.id);
-
-        imageInteractionRef.current = {
-          type: 'drag',
-          id: img.id,
-          startX: e.clientX,
-          startY: e.clientY,
-          origX: img.x,
-          origY: img.y,
-        };
-
-
+                      e.stopPropagation();
+                      setSelectedImageId(img.id);
+                      imageInteractionRef.current = {
+                        type: 'drag', id: img.id,
+                        startX: e.clientX, startY: e.clientY,
+                        origX: img.x, origY: img.y,
+                      };
                       document.body.style.userSelect = 'none';
                     }}
                     onClick={(e) => { e.stopPropagation(); setSelectedImageId(img.id); }}
                   >
                     <img
-  src={img.url}  // ✅ Always use direct URL (already base64 from addFloatingImage)
-  alt="floating"
-  style={{
-    width: '100%',
-    height: '100%',
-    objectFit: 'contain',
-    display: 'block',
-    pointerEvents: 'none',
-    borderRadius: '3px',
-    border: selectedImageId === img.id ? '2px dashed #3b82f6' : 'none',
-  }}
-/>
-
-{selectedImageId === img.id && (
-  <>
-    <button
-      onMouseDown={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        e.stopPropagation();
-        removeFloatingImage(img.id);
-      }}
-      style={{
-        position: 'absolute',
-        top: -12,
-        right: -12,
-        background: '#ef4444',
-        color: '#fff',
-        border: 'none',
-        borderRadius: '50%',
-        width: 22,
-        height: 22,
-        cursor: 'pointer',
-        fontSize: 13,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 200
-      }}
-    >
-      ✕
-    </button>
-
-    <div
-      onMouseDown={(e) => {
-        e.stopPropagation();
-        imageInteractionRef.current = {
-          type: 'resize',
-          id: img.id,
-          startX: e.clientX,
-          startY: e.clientY,
-          origW: img.width,
-          origH: img.height
-        };
-        document.body.style.userSelect = 'none';
-      }}
-      style={{
-        position: 'absolute',
-        bottom: -6,
-        right: -6,
-        width: 14,
-        height: 14,
-        background: '#3b82f6',
-        borderRadius: '50%',
-        cursor: 'se-resize',
-        zIndex: 200
-      }}
-    />
-  </>
-)}
-</div>
+                      src={img.url}
+                      alt="floating"
+                      style={{
+                        width: '100%', height: '100%', objectFit: 'contain', display: 'block',
+                        pointerEvents: 'none', borderRadius: '3px',
+                        border: selectedImageId === img.id ? '2px dashed #3b82f6' : 'none',
+                      }}
+                    />
+                    {selectedImageId === img.id && (
+                      <>
+                        <button
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => { e.stopPropagation(); removeFloatingImage(img.id); }}
+                          style={{
+                            position: 'absolute', top: -12, right: -12,
+                            background: '#ef4444', color: '#fff', border: 'none',
+                            borderRadius: '50%', width: 22, height: 22, cursor: 'pointer',
+                            fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200
+                          }}
+                        >✕</button>
+                        <div
+                          onMouseDown={(e) => {
+                            e.stopPropagation();
+                            imageInteractionRef.current = {
+                              type: 'resize', id: img.id,
+                              startX: e.clientX, startY: e.clientY,
+                              origW: img.width, origH: img.height
+                            };
+                            document.body.style.userSelect = 'none';
+                          }}
+                          style={{
+                            position: 'absolute', bottom: -6, right: -6,
+                            width: 14, height: 14, background: '#3b82f6',
+                            borderRadius: '50%', cursor: 'se-resize', zIndex: 200
+                          }}
+                        />
+                      </>
+                    )}
+                  </div>
                 ))}
 
                 <div className="relative z-20">
-                  {/* Cover */}
                   <div style={{ background: activeTpl.coverBg }}>
                     <div style={{ height: 6, background: activeTpl.accent }} />
                     <div className="px-12 py-10 text-white">
@@ -2422,7 +2316,6 @@ Return ONLY valid JSON, no markdown.`;
                     <div style={{ height: 4, background: activeTpl.accent }} />
                   </div>
 
-                  {/* Metadata */}
                   <div className="px-12 py-8">
                     {companyLogo && (
                       <div className="flex justify-center mb-6">
@@ -2454,7 +2347,6 @@ Return ONLY valid JSON, no markdown.`;
                     </p>
                   </div>
 
-                  {/* Table of Contents */}
                   <div className="px-12 py-8 border-t border-gray-100">
                     <h2 className="text-lg font-bold mb-5" style={{ color: activeTpl.headingColor }}>Table of Contents</h2>
                     <ol className="space-y-1.5">
@@ -2469,7 +2361,6 @@ Return ONLY valid JSON, no markdown.`;
                     </ol>
                   </div>
 
-                  {/* Section content */}
                   {sectionKeys.filter((key) => !skippedSections.has(key)).map((key, idx) => (
                     <div key={key} ref={(el) => (sectionRefs.current[key] = el)} className="px-12 py-8 border-t border-gray-100">
                       <div className="flex items-center gap-3 mb-5 pb-3" style={{ borderBottom: `2px solid ${activeTpl.accent}` }}>
@@ -2484,15 +2375,13 @@ Return ONLY valid JSON, no markdown.`;
                         fontFamily: sectionStyles[key]?.fontFamily || previewFont,
                         fontSize: sectionStyles[key]?.fontSize || '14px',
                         color: sectionStyles[key]?.color || '#374151',
-                        overflowWrap: 'anywhere',
-                        wordBreak: 'normal',
+                        overflowWrap: 'anywhere', wordBreak: 'normal',
                       }}>
                         <PreviewSectionContent content={sections[key] || ''} />
                       </div>
                     </div>
                   ))}
 
-                  {/* Footer */}
                   <div className="px-12 py-5 text-center" style={{ background: activeTpl.headingColor }}>
                     <p className="text-xs text-white opacity-70">
                       Confidential &nbsp;|&nbsp; {vendorName || 'Company Name'} &nbsp;|&nbsp; {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
@@ -2504,7 +2393,6 @@ Return ONLY valid JSON, no markdown.`;
           ) : (
             /* ─── EDIT MODE ─────────────────────────────────────────────────── */
             <div className="max-w-4xl mx-auto space-y-8">
-              {/* Tone & Review Stage bar */}
               <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4 flex flex-wrap items-center gap-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-medium text-gray-500">AI Writing Tone:</span>
@@ -2556,7 +2444,6 @@ Return ONLY valid JSON, no markdown.`;
                   ref={(el) => (sectionRefs.current[key] = el)}
                   className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden"
                 >
-                  {/* Section header */}
                   <div className={`border-b border-gray-100 px-6 py-4 flex items-center gap-2 flex-wrap ${key === 'cost_price_proposal' ? 'bg-green-50' : 'bg-navy/5'}`}>
                     {key === 'cost_price_proposal' ? (
                       <CurrencyDollarIcon className="w-5 h-5 text-green-600" />
@@ -2565,7 +2452,6 @@ Return ONLY valid JSON, no markdown.`;
                     )}
                     <h2 className="text-base font-semibold text-navy">{sectionTitles[key] || sectionLabels[key] || key}</h2>
                     <div className="ml-auto flex items-center gap-1.5 flex-wrap">
-                      {/* Freeze toggle */}
                       <button
                         onClick={() => toggleFreezeSection(key)}
                         className={`flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-md transition-all cursor-pointer ${frozenSections.has(key) ? 'text-orange-600 hover:text-orange-800 bg-orange-50 hover:bg-orange-100 border border-orange-200' : 'text-green-600 hover:text-green-800 bg-green-50 hover:bg-green-100 border border-green-200'}`}
@@ -2649,7 +2535,6 @@ Return ONLY valid JSON, no markdown.`;
                     </div>
                   </div>
 
-                  {/* Section style panel */}
                   {showSectionStyle === key && (
                     <div className="border-b border-gray-100 px-6 py-3 bg-gray-50/80 flex flex-wrap items-center gap-4">
                       <div className="flex items-center gap-2">
@@ -2695,11 +2580,7 @@ Return ONLY valid JSON, no markdown.`;
                       </div>
                       <button
                         type="button"
-                        onClick={() => setSectionNotices((prev) => {
-                          const next = { ...prev };
-                          delete next[key];
-                          return next;
-                        })}
+                        onClick={() => setSectionNotices((prev) => { const next = { ...prev }; delete next[key]; return next; })}
                         className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
                       >
                         Dismiss
@@ -2707,7 +2588,6 @@ Return ONLY valid JSON, no markdown.`;
                     </div>
                   )}
 
-                  {/* Section body */}
                   <div className="p-4">
                     {frozenSections.has(key) ? (
                       <div className="relative">
@@ -2781,7 +2661,7 @@ Return ONLY valid JSON, no markdown.`;
             </div>
           )}
 
-          {/* Disclaimer before PDF export */}
+          {/* Disclaimer */}
           <div
             ref={exportDisclaimerRef}
             className="max-w-4xl mx-auto bg-white border border-amber-200 rounded-xl p-5 mt-8 mb-20 shadow-sm"
@@ -2796,9 +2676,7 @@ Return ONLY valid JSON, no markdown.`;
                   This application generates proposal documents based on user inputs and available data sources. All outputs are automated and may not reflect complete or fully verified information. By exporting this proposal to PDF, you acknowledge that you are solely responsible for reviewing, verifying, and ensuring the accuracy and suitability of all content prior to submission. The application and its providers shall not be liable for any damages, errors, omissions, or outcomes arising from use of the generated content. All use is at your sole risk and discretion.
                 </p>
                 <label className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 cursor-pointer transition-all ${
-                  pdfDisclaimerAccepted
-                    ? 'bg-green-50 border-green-200 text-green-800'
-                    : 'bg-amber-50 border-amber-200 text-gray-700'
+                  pdfDisclaimerAccepted ? 'bg-green-50 border-green-200 text-green-800' : 'bg-amber-50 border-amber-200 text-gray-700'
                 }`}>
                   <input
                     type="checkbox"

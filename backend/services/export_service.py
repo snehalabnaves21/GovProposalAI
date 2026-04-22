@@ -52,6 +52,9 @@ BORDER_COLOR = RGBColor(0xD1, 0xD5, 0xDB)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 UPLOADS_DIR = Path(__file__).resolve().parents[1] / "data" / "uploads"
 
+# Page content width for PDF (letter 8.5" - 0.75" left - 0.75" right margins)
+PDF_CONTENT_WIDTH = 7.0 * inch
+
 
 def _normalize_hex_color(value: str, fallback: str) -> str:
     """Return a ReportLab-friendly hex color string."""
@@ -94,7 +97,6 @@ def _add_formatted_paragraph(doc, text: str, size=11, color=DARK_TEXT, bold=Fals
     para.paragraph_format.space_before = Pt(space_before)
     para.paragraph_format.space_after = Pt(space_after)
 
-    # Handle markdown bold within text
     parts = re.split(r'(\*\*.*?\*\*)', text)
     for part in parts:
         if part.startswith('**') and part.endswith('**'):
@@ -114,30 +116,19 @@ def _add_formatted_paragraph(doc, text: str, size=11, color=DARK_TEXT, bold=Fals
 
 
 def _strip_leading_title(content: str, section_title: str) -> str:
-    """Remove duplicate section title from the start of content.
-    AI often generates: <h2>EXECUTIVE SUMMARY</h2><p>Executive Summary text...</p>
-    We need to strip both the heading AND the inline title text."""
+    """Remove duplicate section title from the start of content."""
     if not content or not section_title:
         return content
     title_lower = section_title.lower().strip()
 
-    # Step 1: Remove heading tags that contain the section title
-    # Matches: <h1>Executive Summary</h1>, <h2>EXECUTIVE SUMMARY</h2>, etc.
     heading_pattern = rf'\s*<h[1-6][^>]*>\s*{re.escape(title_lower)}\s*</h[1-6]>\s*'
     content = re.sub(heading_pattern, '', content, count=1, flags=re.IGNORECASE).strip()
 
-    # Step 2: Remove the title text if it appears at the very start of remaining content
-    # E.g., <p>Executive Summary TalentTalk...</p> → <p>TalentTalk...</p>
-    # Or: <p><strong>Company Profile</strong> TalentTalk...</p> → <p>TalentTalk...</p>
-    # First extract text-only version to check
     text_only = re.sub(r'<[^>]+>', '', content[:200]).strip()
     if text_only.lower().startswith(title_lower):
-        # Remove title from inside the first tag or at the start
-        # Pattern: optional tags, then the title text
         inner_pattern = rf'(<p[^>]*>(?:\s*<(?:strong|b|em|i)[^>]*>)?\s*){re.escape(title_lower)}(\s*(?:</(?:strong|b|em|i)>)?\s*)'
         cleaned = re.sub(inner_pattern, r'\1', content, count=1, flags=re.IGNORECASE)
         if cleaned != content:
-            # Clean up empty tags like <p><strong></strong> </p>
             cleaned = re.sub(r'<p[^>]*>\s*(?:<(?:strong|b|em|i)[^>]*>\s*</(?:strong|b|em|i)>\s*)*</p>\s*', '', cleaned)
             content = cleaned.strip()
 
@@ -154,7 +145,6 @@ def _add_styled_table(doc, headers: List[str], rows: List[List[str]],
     table = doc.add_table(rows=1 + len(rows), cols=num_cols)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    # Header row
     for i, header_text in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = ""
@@ -168,7 +158,6 @@ def _add_styled_table(doc, headers: List[str], rows: List[List[str]],
         _set_cell_shading(cell, header_bg)
         _set_cell_borders(cell, NAVY_HEX)
 
-    # Data rows
     for row_idx, row_data in enumerate(rows):
         for col_idx in range(num_cols):
             cell = table.rows[row_idx + 1].cells[col_idx]
@@ -188,7 +177,7 @@ def _add_styled_table(doc, headers: List[str], rows: List[List[str]],
 
 def _add_html_table_to_docx(doc, headers: List[str], rows: List[Dict],
                              header_bg=HEADER_BG, alt_row_bg=LIGHT_GRAY_BG, summary_bg=SUB_HEADER_BG):
-    """Render an HTML table (with summary row support) as a professional DOCX table."""
+    """Render an HTML table as a professional DOCX table."""
     if not headers and not rows:
         return None
 
@@ -224,7 +213,6 @@ def _add_html_table_to_docx(doc, headers: List[str], rows: List[Dict],
             cell_text = cells_data[col_idx] if col_idx < len(cells_data) else ""
             cell.text = ""
             p = cell.paragraphs[0]
-            # Right-align currency/number columns (last columns typically)
             if cell_text.startswith('$') or (col_idx >= num_cols - 2 and re.match(r'^[\d,.$]+$', cell_text.strip())):
                 p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             run = p.add_run(cell_text)
@@ -245,8 +233,7 @@ def _add_html_table_to_docx(doc, headers: List[str], rows: List[Dict],
 
 
 def _detect_table_content(lines: List[str]) -> Optional[Tuple[List[str], List[List[str]]]]:
-    """Detect if a block of lines contains table-like data (pipe-separated or consistent delimiters)."""
-    # Check for pipe-separated tables: | Header1 | Header2 |
+    """Detect if a block of lines contains table-like data."""
     pipe_lines = [l for l in lines if '|' in l and l.count('|') >= 2]
     if len(pipe_lines) >= 2:
         headers = []
@@ -263,7 +250,6 @@ def _detect_table_content(lines: List[str]) -> Optional[Tuple[List[str], List[Li
         if headers and rows:
             return headers, rows
 
-    # Check for colon-separated key-value pairs (3+ consecutive)
     kv_lines = []
     for line in lines:
         if ':' in line and not line.startswith('#'):
@@ -277,7 +263,7 @@ def _detect_table_content(lines: List[str]) -> Optional[Tuple[List[str], List[Li
 
 
 def _detect_risk_register(text: str) -> Optional[Tuple[List[str], List[List[str]]]]:
-    """Detect risk register format: Risk: X | Probability: Y | Impact: Z"""
+    """Detect risk register format."""
     pattern = r'(?:Risk|Issue)\s*:\s*(.+?)\s*\|\s*(?:Probability|Likelihood)\s*:\s*(\w+)\s*\|\s*Impact\s*:\s*(\w+)\s*\|\s*Mitigation\s*:\s*(.+?)(?:\s*\|\s*Contingency\s*:\s*(.+?))?(?:\n|$)'
     matches = re.findall(pattern, text, re.IGNORECASE)
     if matches:
@@ -299,7 +285,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
     try:
         doc = Document()
 
-        # --- Document styles ---
         style = doc.styles["Normal"]
         style.font.name = "Calibri"
         style.font.size = Pt(11)
@@ -309,7 +294,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         vendor_name = proposal.get("vendor_name", "")
         sections = proposal.get("sections", {})
 
-        # Extended metadata for structured cover page
         meta = proposal.get("metadata", {})
         proposal_type = meta.get("proposal_type", "Government Contract Proposal")
         agency = meta.get("agency", "")
@@ -325,9 +309,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         poc_phone = meta.get("poc_phone", "")
         display_date = submission_date if submission_date else datetime.now().strftime('%B %d, %Y')
 
-        # ============================================================
-        # DOCUMENT FOOTER — Logo (left), Page Number (center), CONFIDENTIAL (right)
-        # ============================================================
         company_logo = proposal.get("company_logo", "")
         section = doc.sections[0]
         footer = section.footer
@@ -335,11 +316,9 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         footer_para.clear()
 
-        # Create a 3-column table in the footer for layout
         footer_table = footer.add_table(rows=1, cols=3, width=Inches(7))
         footer_table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        # Left cell — Company logo (small)
         left_cell = footer_table.rows[0].cells[0]
         left_cell.text = ""
         left_cell.width = Inches(2.3)
@@ -355,7 +334,7 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 from PIL import Image as PILImage
                 _pil_img = PILImage.open(io.BytesIO(logo_bytes))
                 _iw, _ih = _pil_img.size
-                _max_w, _max_h = 0.8, 0.35  # footer: small
+                _max_w, _max_h = 0.8, 0.35
                 _scale = min(_max_w / (_iw / 96.0), _max_h / (_ih / 96.0), 1.0)
                 _fit_w = (_iw / 96.0) * _scale
                 _fit_h = (_ih / 96.0) * _scale
@@ -372,7 +351,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             lr.font.color.rgb = GRAY_TEXT
             lr.font.name = "Calibri"
 
-        # Center cell — Page number (auto-updating field)
         center_cell = footer_table.rows[0].cells[1]
         center_cell.text = ""
         center_cell.width = Inches(2.4)
@@ -384,8 +362,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         cr.font.size = Pt(8)
         cr.font.color.rgb = GRAY_TEXT
         cr.font.name = "Calibri"
-        # Add PAGE field
-        fldChar1 = parse_xml(f'<w:fldChar {nsdecls("w")} w:fldCharType="begin"/>')
         cr2_elem = parse_xml(f'<w:r {nsdecls("w")}><w:rPr><w:sz w:val="16"/><w:color w:val="6B7280"/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>')
         instrText = parse_xml(f'<w:r {nsdecls("w")}><w:rPr><w:sz w:val="16"/><w:color w:val="6B7280"/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>')
         fldChar2 = parse_xml(f'<w:r {nsdecls("w")}><w:rPr><w:sz w:val="16"/><w:color w:val="6B7280"/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>')
@@ -393,7 +369,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         cp._p.append(instrText)
         cp._p.append(fldChar2)
 
-        # Right cell — CONFIDENTIAL
         right_cell = footer_table.rows[0].cells[2]
         right_cell.text = ""
         right_cell.width = Inches(2.3)
@@ -407,7 +382,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         rr.font.bold = False
         rr.font.name = "Calibri"
 
-        # Remove borders from footer table
         for row in footer_table.rows:
             for cell in row.cells:
                 tc = cell._tc
@@ -422,11 +396,7 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 )
                 tcPr.append(tcBorders)
 
-        # ============================================================
-        # COVER PAGE — Professional government proposal layout
-        # ============================================================
-
-        # --- Top Navy Banner ---
+        # --- Cover Page ---
         banner = doc.add_table(rows=1, cols=1)
         banner.alignment = WD_TABLE_ALIGNMENT.CENTER
         bc = banner.rows[0].cells[0]
@@ -437,14 +407,12 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         bp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         bp.paragraph_format.space_before = Pt(24)
         bp.paragraph_format.space_after = Pt(24)
-        # Title in white on navy
         tr = bp.add_run(proposal_title.upper())
         tr.bold = True
         tr.font.size = Pt(24)
         tr.font.color.rgb = WHITE
         tr.font.name = "Calibri"
 
-        # --- Green accent bar ---
         accent_bar = doc.add_table(rows=1, cols=1)
         accent_bar.alignment = WD_TABLE_ALIGNMENT.CENTER
         ac = accent_bar.rows[0].cells[0]
@@ -463,19 +431,16 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_paragraph("")
 
-        # --- Company logo ---
         company_logo = proposal.get("company_logo", "")
         if company_logo and company_logo.startswith("data:image"):
             try:
-                # Parse base64 data URL: data:image/png;base64,AAAA...
                 header, b64data = company_logo.split(",", 1)
                 logo_bytes = base64.b64decode(b64data)
                 logo_stream = io.BytesIO(logo_bytes)
-                # Get actual image dimensions to preserve aspect ratio
                 from PIL import Image as PILImage
                 _pil_img = PILImage.open(io.BytesIO(logo_bytes))
                 _iw, _ih = _pil_img.size
-                _max_w, _max_h = 2.0, 1.0  # max inches
+                _max_w, _max_h = 2.0, 1.0
                 _scale = min(_max_w / (_iw / 96.0), _max_h / (_ih / 96.0), 1.0)
                 _fit_w = (_iw / 96.0) * _scale
                 _fit_h = (_ih / 96.0) * _scale
@@ -504,7 +469,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_paragraph("")
 
-        # --- Main info table (2 columns: labels on left, values on right) ---
         info_table = doc.add_table(rows=0, cols=2)
         info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
         info_table.columns[0].width = Inches(2.2)
@@ -512,7 +476,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         def _add_info_row(label, value, value_bold=False, value_size=11):
             row = info_table.add_row()
-            # Label cell
             lc = row.cells[0]
             lc.text = ""
             lp = lc.paragraphs[0]
@@ -524,7 +487,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             lrun.font.color.rgb = GRAY_TEXT
             lrun.font.name = "Calibri"
             lrun.bold = True
-            # Value cell
             vc = row.cells[1]
             vc.text = ""
             vp = vc.paragraphs[0]
@@ -536,19 +498,15 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             vrun.font.name = "Calibri"
             vrun.bold = value_bold
 
-        # Fill rows
         if agency:
             submitted_to = agency
             if contracting_office:
                 submitted_to += f"\n{contracting_office}"
             _add_info_row("Submitted To:", submitted_to, value_bold=True, value_size=12)
-
         if solicitation_number:
             _add_info_row("Solicitation No:", solicitation_number)
-
         if vendor_name:
             _add_info_row("Submitted By:", vendor_name, value_bold=True, value_size=12)
-
         if cage_code:
             _add_info_row("CAGE Code:", cage_code)
         if duns_number:
@@ -556,9 +514,7 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         if naics_codes:
             codes_str = ", ".join(naics_codes) if isinstance(naics_codes, list) else str(naics_codes)
             _add_info_row("NAICS Codes:", codes_str)
-
         _add_info_row("Submission Date:", display_date)
-
         if poc_name:
             poc_value = poc_name
             if poc_title_str:
@@ -572,7 +528,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 poc_value += f"\n{' | '.join(poc_details)}"
             _add_info_row("Point of Contact:", poc_value, value_bold=True)
 
-        # Style the info table — light borders, alternating subtle bg
         for row_idx, row in enumerate(info_table.rows):
             for cell in row.cells:
                 _set_cell_borders(cell, "E5E7EB", "2")
@@ -581,7 +536,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_paragraph("")
 
-        # --- Bottom accent line ---
         bottom_line = doc.add_table(rows=1, cols=1)
         bottom_line.alignment = WD_TABLE_ALIGNMENT.CENTER
         blc = bottom_line.rows[0].cells[0]
@@ -596,7 +550,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_paragraph("")
 
-        # Professional footer note
         _add_formatted_paragraph(
             doc, f"Confidential  |  {vendor_name or 'Company Name'}  |  Prepared {display_date}",
             size=9, color=RGBColor(0x6B, 0x72, 0x80), italic=False,
@@ -605,15 +558,12 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_page_break()
 
-        # ============================================================
-        # TABLE OF CONTENTS — with Volume grouping + page numbers
-        # ============================================================
+        # --- Table of Contents ---
         toc_heading = doc.add_heading("Table of Contents", level=1)
         for run in toc_heading.runs:
             run.font.color.rgb = NAVY
             run.font.name = "Calibri"
 
-        # Green accent line under heading
         accent_table = doc.add_table(rows=1, cols=1)
         accent_table.alignment = WD_TABLE_ALIGNMENT.LEFT
         ac = accent_table.rows[0].cells[0]
@@ -622,7 +572,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
         ac.paragraphs[0].paragraph_format.space_after = Pt(0)
         _set_cell_shading(ac, ACCENT_HEX)
         ac.width = Inches(6.5)
-        # Make the row very thin
         tr_el = accent_table.rows[0]._tr
         trPr = tr_el.get_or_add_trPr()
         trHeight = parse_xml(f'<w:trHeight {nsdecls("w")} w:val="40" w:hRule="exact"/>')
@@ -630,15 +579,12 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_paragraph("")
 
-        # Volume grouping for sections — dynamic or auto-fallback
         section_list = list(sections.items())
         total_sections = len(section_list)
         section_keys = [k for k, _ in section_list]
         volume_assignments = proposal.get("volume_assignments", {})
 
-        # Build ordered volumes list: [(vol_label, [(section_key, section_data), ...])]
         if volume_assignments:
-            # User-defined volume grouping
             assigned_keys = set()
             volumes = []
             for vol_label, vol_section_keys in volume_assignments.items():
@@ -649,12 +595,10 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                         assigned_keys.add(sk)
                 if vol_items:
                     volumes.append((vol_label, vol_items))
-            # Any unassigned sections go into "Other"
             unassigned = [(k, v) for k, v in section_list if k not in assigned_keys]
             if unassigned:
                 volumes.append(("Other Sections", unassigned))
         else:
-            # Auto-fallback: split into 3 volumes
             vol1_end = min(3, total_sections)
             vol2_end = min(vol1_end + max((total_sections - vol1_end) // 2, 3), total_sections)
             volumes = [
@@ -663,7 +607,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 ("Volume III \u2014 Management & Compliance", section_list[vol2_end:]),
             ]
 
-        # Estimate page numbers: cover=1, TOC=2, content starts page 3
         page_num = 3
         global_idx = 0
 
@@ -671,7 +614,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             if not vol_items:
                 continue
 
-            # Volume header row
             vol_para = doc.add_paragraph()
             vol_para.paragraph_format.space_before = Pt(12)
             vol_para.paragraph_format.space_after = Pt(4)
@@ -681,20 +623,17 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             vr.font.color.rgb = NAVY
             vr.font.name = "Calibri"
 
-            # Table for this volume's sections: No. | Title | Page
             toc_table = doc.add_table(rows=len(vol_items), cols=3)
             toc_table.alignment = WD_TABLE_ALIGNMENT.LEFT
 
-            # Set column widths
             for row in toc_table.rows:
                 row.cells[0].width = Inches(0.4)
                 row.cells[1].width = Inches(5.2)
                 row.cells[2].width = Inches(0.9)
 
             for local_idx, (section_key, section_data) in enumerate(vol_items):
-                section_title = section_data.get("title", section_key.replace("_", " ").title())
+                raw_t = section_data.get("title", ""); section_title = (raw_t if raw_t and "_" not in raw_t else section_key.replace("_", " ").title())
 
-                # Number cell — tight width
                 num_cell = toc_table.rows[local_idx].cells[0]
                 num_cell.text = ""
                 p = num_cell.paragraphs[0]
@@ -706,7 +645,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 run.font.bold = True
                 run.font.name = "Calibri"
 
-                # Title cell — closer to number
                 title_cell = toc_table.rows[local_idx].cells[1]
                 title_cell.text = ""
                 p = title_cell.paragraphs[0]
@@ -717,7 +655,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 run.font.color.rgb = DARK_TEXT
                 run.font.name = "Calibri"
 
-                # Page number cell — right aligned
                 page_cell = toc_table.rows[local_idx].cells[2]
                 page_cell.text = ""
                 p = page_cell.paragraphs[0]
@@ -729,7 +666,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 run.font.color.rgb = GRAY_TEXT
                 run.font.name = "Calibri"
 
-                # Alternating row shading
                 if local_idx % 2 == 0:
                     _set_cell_shading(num_cell, LIGHT_GRAY_BG)
                     _set_cell_shading(title_cell, LIGHT_GRAY_BG)
@@ -740,39 +676,25 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
         doc.add_page_break()
 
-        # ============================================================
-        # CONTENT SECTIONS (skip cover_page — already rendered as page 1)
-        # ============================================================
+        # --- Content Sections ---
         content_sections = [(k, v) for k, v in sections.items() if k != "cover_page"]
         for idx, (section_key, section_data) in enumerate(content_sections, start=1):
-            section_title = section_data.get("title", section_key.replace("_", " ").title())
+            raw_t = section_data.get("title", ""); section_title = (raw_t if raw_t and "_" not in raw_t else section_key.replace("_", " ").title())
             content = section_data.get("content", "")
 
             if idx > 1:
                 doc.add_page_break()
 
-            # Section number badge + title
             heading_para = doc.add_paragraph()
             heading_para.paragraph_format.space_before = Pt(0)
             heading_para.paragraph_format.space_after = Pt(2)
 
-            num_run = heading_para.add_run(f"  {idx}  ")
-            num_run.bold = True
-            num_run.font.size = Pt(12)
-            num_run.font.color.rgb = WHITE
-            num_run.font.name = "Calibri"
-            # We can't easily add a background to a run in python-docx,
-            # so we use a different visual approach
-
-            # Section heading with accent underline
             section_heading = doc.add_heading(f"{idx}. {section_title}", level=1)
             for run in section_heading.runs:
                 run.font.color.rgb = NAVY
                 run.font.name = "Calibri"
-            # Remove the auto-generated empty paragraph
             heading_para._element.getparent().remove(heading_para._element)
 
-            # Accent underline
             line_table = doc.add_table(rows=1, cols=1)
             line_table.alignment = WD_TABLE_ALIGNMENT.LEFT
             cell = line_table.rows[0].cells[0]
@@ -786,10 +708,8 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
 
             doc.add_paragraph("")
 
-            # Check for risk register format in the full content
             risk_data = _detect_risk_register(content)
             if risk_data and section_key in ('risk_mitigation', 'risk_register'):
-                # Render narrative text before the table
                 pre_table_lines = []
                 for line in content.split('\n'):
                     if re.search(r'(?:Risk|Issue)\s*:', line, re.IGNORECASE) and '|' in line:
@@ -800,16 +720,9 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
                 _add_styled_table(doc, risk_data[0], risk_data[1])
                 continue
 
-            # Strip duplicate section title from content start
-            # AI often generates content that begins with the section title
             content = _strip_leading_title(content, section_title)
-
-            # Parse and render content
             _render_content_lines(doc, content, section_key)
 
-        # ============================================================
-        # FOOTER - Generated notice
-        # ============================================================
         doc.add_paragraph("")
         _add_formatted_paragraph(
             doc,
@@ -818,7 +731,6 @@ def generate_docx(proposal: Dict) -> io.BytesIO:
             alignment=WD_ALIGN_PARAGRAPH.CENTER
         )
 
-        # Save to buffer
         buffer = io.BytesIO()
         doc.save(buffer)
         buffer.seek(0)
@@ -833,7 +745,6 @@ def _render_content_lines(doc, content: str, section_key: str = ""):
     """Render content with smart detection of tables, lists, and structured data."""
     parsed = _html_to_paragraphs(content)
 
-    # Collect consecutive lines to detect table blocks
     i = 0
     while i < len(parsed):
         para = parsed[i]
@@ -845,7 +756,6 @@ def _render_content_lines(doc, content: str, section_key: str = ""):
             i += 1
             continue
 
-        # Render HTML tables extracted from content
         if ptype == 'html_table':
             td = para.get('table_data', {})
             headers = td.get('headers', [])
@@ -856,7 +766,6 @@ def _render_content_lines(doc, content: str, section_key: str = ""):
             i += 1
             continue
 
-        # Check if this starts a table-like block (pipe-separated lines)
         if '|' in ptext and ptext.count('|') >= 2:
             table_lines = [ptext]
             j = i + 1
@@ -871,7 +780,6 @@ def _render_content_lines(doc, content: str, section_key: str = ""):
                     i = j
                     continue
 
-        # Regular content rendering
         if ptype in ('h1', 'h2'):
             heading = doc.add_heading(_strip_markdown_bold(ptext), level=2)
             for run in heading.runs:
@@ -886,7 +794,6 @@ def _render_content_lines(doc, content: str, section_key: str = ""):
             clean = _strip_markdown_bold(ptext)
             if clean:
                 bp = doc.add_paragraph(style="List Bullet")
-                # Handle bold parts within bullet
                 parts = re.split(r'(\*\*.*?\*\*)', ptext)
                 for part in parts:
                     if part.startswith('**') and part.endswith('**'):
@@ -930,42 +837,65 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             bottomMargin=0.85 * inch,
         )
 
+        # ── Dark / Black theme colours ──────────────────────────────────
+        BG_DARK      = "#0F1117"   # page background (simulated via section blocks)
+        CARD_DARK    = "#1A1D27"   # section card bg
+        ACCENT_GOLD  = "#F5A623"   # gold accent
+        HEADING_WHITE= "#FFFFFF"
+        BODY_LIGHT   = "#D1D5DB"
+        SUBHEAD_GOLD = "#F5A623"
+        BORDER_DARK  = "#2D3148"
+
+        # Override template colours with dark theme
+        heading_hex  = "1A1D27"
+        accent_hex   = "F5A623"
+
         styles = getSampleStyleSheet()
+
+        # Helper: no-hyphen body style
+        def _body(name, **kw):
+            defaults = dict(
+                parent=styles["Normal"],
+                fontSize=10.5, leading=16, spaceAfter=7,
+                fontName="Helvetica",
+                textColor=colors.HexColor(BODY_LIGHT),
+                wordWrap='LTR',
+                hyphenationLang='',          # disable hyphenation
+                embeddedHyphenation=0,
+                splitLongWords=0,
+                alignment=4,                 # JUSTIFY
+            )
+            defaults.update(kw)
+            return ParagraphStyle(name, **defaults)
 
         styles.add(ParagraphStyle(
             name="ProposalTitle", parent=styles["Title"],
-            fontSize=26, textColor=colors.HexColor("#1B2A4A"),
+            fontSize=26, textColor=colors.HexColor(HEADING_WHITE),
             spaceAfter=12, alignment=1, fontName="Helvetica-Bold",
         ))
         styles.add(ParagraphStyle(
             name="ProposalSubtitle", parent=styles["Normal"],
-            fontSize=14, textColor=colors.HexColor("#10B981"),
+            fontSize=14, textColor=colors.HexColor(ACCENT_GOLD),
             spaceAfter=8, alignment=1, fontName="Helvetica",
         ))
         styles.add(ParagraphStyle(
             name="SectionHeading", parent=styles["Heading1"],
-            fontSize=16, textColor=colors.HexColor("#1B2A4A"),
+            fontSize=16, textColor=colors.HexColor(HEADING_WHITE),
             spaceBefore=20, spaceAfter=10, fontName="Helvetica-Bold",
         ))
         styles.add(ParagraphStyle(
             name="SubHeading", parent=styles["Heading2"],
-            fontSize=13, textColor=colors.HexColor("#059669"),
-            spaceBefore=12, spaceAfter=6, fontName="Helvetica-Bold",
+            fontSize=12, textColor=colors.HexColor(ACCENT_GOLD),
+            spaceBefore=10, spaceAfter=5, fontName="Helvetica-Bold",
         ))
-        styles.add(ParagraphStyle(
-            name="ProposalBody", parent=styles["Normal"],
-            fontSize=10.5, leading=14, spaceAfter=6,
-            fontName="Helvetica", textColor=colors.HexColor("#374151"),
-        ))
-        styles.add(ParagraphStyle(
-            name="ProposalBullet", parent=styles["Normal"],
-            fontSize=10.5, leading=14, spaceAfter=4,
-            leftIndent=20, bulletIndent=10,
-            fontName="Helvetica", textColor=colors.HexColor("#374151"),
+        styles.add(_body("ProposalBody"))
+        styles.add(_body(
+            "ProposalBullet",
+            leftIndent=18, bulletIndent=8, spaceAfter=4,
         ))
         styles.add(ParagraphStyle(
             name="Confidential", parent=styles["Normal"],
-            fontSize=9, textColor=colors.HexColor("#990000"),
+            fontSize=9, textColor=colors.HexColor("#999999"),
             alignment=1, fontName="Helvetica-Oblique",
         ))
         styles.add(ParagraphStyle(
@@ -975,9 +905,11 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         ))
         styles.add(ParagraphStyle(
             name="TableCell", parent=styles["Normal"],
-            fontSize=9, textColor=colors.HexColor("#374151"),
-            fontName="Helvetica", leading=12,
+            fontSize=9, textColor=colors.HexColor(BODY_LIGHT),
+            fontName="Helvetica", leading=13,
+            wordWrap='LTR', splitLongWords=0,
         ))
+
 
         story = []
         proposal_title = proposal.get("proposal_title", "Government Proposal")
@@ -986,12 +918,11 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         template = proposal.get("template") or {}
         accent_hex = _normalize_hex_color(template.get("accent", ""), "#10B981")
         heading_hex = _normalize_hex_color(template.get("headingColor", ""), "#1B2A4A")
-        styles["ProposalTitle"].textColor = colors.HexColor(heading_hex)
-        styles["ProposalSubtitle"].textColor = colors.HexColor(accent_hex)
-        styles["SectionHeading"].textColor = colors.HexColor(heading_hex)
-        styles["SubHeading"].textColor = colors.HexColor(accent_hex)
+        styles["ProposalTitle"].textColor = colors.HexColor("#0F1117")
+        styles["ProposalSubtitle"].textColor = colors.HexColor("#F5A623")
+        styles["SectionHeading"].textColor = colors.HexColor("#0F1117")
+        styles["SubHeading"].textColor = colors.HexColor("#F5A623")
 
-        # Extended metadata for structured cover page
         meta = proposal.get("metadata") or {}
         proposal_type = meta.get("proposal_type", "Government Contract Proposal")
         agency = meta.get("agency", "")
@@ -1007,62 +938,42 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         poc_phone = meta.get("poc_phone", "")
         display_date = submission_date if submission_date else datetime.now().strftime('%B %d, %Y')
 
-        # Helper styles for cover page
         label_style = ParagraphStyle(
             "CoverLabel", parent=styles["Normal"],
-            fontSize=10, textColor=colors.HexColor("#6B7280"),
-            alignment=1, fontName="Helvetica",
-        )
-        info_style = ParagraphStyle(
-            "CoverInfo", parent=styles["Normal"],
-            fontSize=11, textColor=colors.HexColor("#374151"),
-            alignment=1, fontName="Helvetica",
-        )
-        info_bold_style = ParagraphStyle(
-            "CoverInfoBold", parent=styles["Normal"],
-            fontSize=13, textColor=colors.HexColor("#1B2A4A"),
-            alignment=1, fontName="Helvetica-Bold",
-        )
-        vendor_style = ParagraphStyle(
-            "VendorName", parent=styles["Normal"],
-            fontSize=14, textColor=colors.HexColor("#1B2A4A"),
-            alignment=1, fontName="Helvetica-Bold",
-        )
-        date_style = ParagraphStyle(
-            "DateLine", parent=styles["Normal"],
-            fontSize=11, textColor=colors.HexColor("#374151"),
+            fontSize=10, textColor=colors.HexColor("#999999"),
             alignment=1, fontName="Helvetica",
         )
 
-        # --- Cover Page — Professional layout ---
+        # Dark background block at top
+        story.append(RLTable([[""]], colWidths=[PDF_CONTENT_WIDTH], rowHeights=[0.12 * inch]))
 
-        # Navy banner with title
+        # --- Cover Page ---
         banner_data = [[RLParagraph(
             f"<b>{_escape_xml(proposal_title.upper())}</b>",
             ParagraphStyle("BannerTitle", parent=styles["Normal"],
                            fontSize=22, textColor=colors.white, alignment=1,
                            fontName="Helvetica-Bold", leading=28)
         )]]
-        banner = RLTable(banner_data, colWidths=[7 * inch], rowHeights=[0.8 * inch])
+        banner = RLTable(banner_data, colWidths=[PDF_CONTENT_WIDTH], rowHeights=[1.0 * inch])
         banner.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(heading_hex)),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0F1117")),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 16),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 16),
+            ("TOPPADDING", (0, 0), (-1, -1), 20),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 20),
+            ("LEFTPADDING", (0, 0), (-1, -1), 20),
         ]))
         story.append(banner)
 
-        # Green accent bar with proposal type
         accent_data = [[RLParagraph(
             f"<b>{_escape_xml(proposal_type)}</b>",
             ParagraphStyle("AccentBar", parent=styles["Normal"],
-                           fontSize=12, textColor=colors.white, alignment=1,
+                           fontSize=12, textColor=colors.HexColor("#0F1117"), alignment=1,
                            fontName="Helvetica-Bold")
         )]]
-        accent_bar = RLTable(accent_data, colWidths=[7 * inch], rowHeights=[0.4 * inch])
+        accent_bar = RLTable(accent_data, colWidths=[PDF_CONTENT_WIDTH], rowHeights=[0.4 * inch])
         accent_bar.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5A623")),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ]))
@@ -1070,7 +981,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
 
         story.append(Spacer(1, 0.3 * inch))
 
-        # Company logo
+        # Company logo — constrained to page width
         company_logo = proposal.get("company_logo", "")
         if company_logo and company_logo.startswith("data:image"):
             try:
@@ -1078,17 +989,20 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
                 header, b64data = company_logo.split(",", 1)
                 logo_bytes = base64.b64decode(b64data)
                 logo_stream = io.BytesIO(logo_bytes)
-                # Preserve aspect ratio
                 from PIL import Image as PILImage
                 _pil_img = PILImage.open(io.BytesIO(logo_bytes))
                 _iw, _ih = _pil_img.size
-                _max_w, _max_h = 2.0, 1.0  # max inches
+                _max_w, _max_h = 2.0, 1.0
                 _scale = min(_max_w / (_iw / 96.0), _max_h / (_ih / 96.0), 1.0)
                 _fit_w = (_iw / 96.0) * _scale
                 _fit_h = (_ih / 96.0) * _scale
                 logo_img = RLImage(logo_stream, width=_fit_w * inch, height=_fit_h * inch)
-                logo_img.hAlign = "CENTER"
-                story.append(logo_img)
+                logo_table = RLTable([[logo_img]], colWidths=[PDF_CONTENT_WIDTH])
+                logo_table.setStyle(TableStyle([
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]))
+                story.append(logo_table)
             except Exception as logo_err:
                 logger.warning("Failed to embed logo in PDF: %s", logo_err)
                 story.append(RLParagraph("[Company Logo]", label_style))
@@ -1097,7 +1011,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
 
         story.append(Spacer(1, 0.3 * inch))
 
-        # Info table (label | value)
+        # Info table
         info_rows = []
         if agency:
             agency_text = _escape_xml(agency)
@@ -1134,66 +1048,59 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             for lbl, val, val_bold in info_rows:
                 lbl_para = RLParagraph(f"<b>{_escape_xml(lbl)}</b>", ParagraphStyle(
                     "InfoLabel", parent=styles["Normal"], fontSize=9.5,
-                    textColor=colors.HexColor("#6B7280"), alignment=2, fontName="Helvetica-Bold"))
+                    textColor=colors.HexColor("#F5A623"), alignment=2, fontName="Helvetica-Bold"))
                 val_text = f"<b>{val}</b>" if val_bold else val
                 val_para = RLParagraph(val_text, ParagraphStyle(
                     "InfoValue", parent=styles["Normal"], fontSize=10.5,
-                    textColor=colors.HexColor("#1B2A4A") if val_bold else colors.HexColor("#374151"),
-                    fontName="Helvetica-Bold" if val_bold else "Helvetica", leading=14))
+                    textColor=colors.white if val_bold else colors.HexColor("#2D3148"),
+                    fontName="Helvetica-Bold" if val_bold else "Helvetica", leading=14,
+                    wordWrap='LTR', splitLongWords=0))
                 table_data.append([lbl_para, val_para])
 
-            info_tbl = RLTable(table_data, colWidths=[1.8 * inch, 4.5 * inch])
+            info_tbl = RLTable(table_data, colWidths=[1.8 * inch, PDF_CONTENT_WIDTH - 1.8 * inch])
             tbl_style = [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("LEFTPADDING", (0, 0), (0, -1), 12),
                 ("RIGHTPADDING", (0, 0), (0, -1), 8),
                 ("LEFTPADDING", (1, 0), (1, -1), 8),
-                ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#E5E7EB")),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#2D3148")),
             ]
             for i in range(0, len(table_data), 2):
-                tbl_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F9FAFB")))
+                tbl_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1A1D27")))
             info_tbl.setStyle(TableStyle(tbl_style))
             story.append(info_tbl)
 
         story.append(Spacer(1, 0.4 * inch))
 
-        # Bottom accent line
-        bottom = RLTable([[""]], colWidths=[7 * inch], rowHeights=[3])
+        bottom = RLTable([[""]], colWidths=[PDF_CONTENT_WIDTH], rowHeights=[4])
         bottom.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5A623")),
         ]))
         story.append(bottom)
 
         story.append(Spacer(1, 0.2 * inch))
-        # Professional footer note (no CONFIDENTIAL marking)
         story.append(RLParagraph(
             f"Confidential  |  {_escape_xml(vendor_name or 'Company Name')}  |  Prepared {_escape_xml(display_date)}",
             ParagraphStyle("CoverFooterNote", parent=styles["Normal"],
-                           fontSize=9, textColor=colors.HexColor("#6B7280"),
+                           fontSize=9, textColor=colors.HexColor("#999999"),
                            alignment=1, fontName="Helvetica")))
 
-        floating_images = proposal.get("floating_images") or []
-        if floating_images:
-            story.append(Spacer(1, 0.2 * inch))
-            for image in floating_images[:6]:
-                _add_pdf_image(story, image.get("url", ""), styles)
+        # NOTE: floating_images intentionally excluded from PDF to prevent layout overflow
 
         story.append(PageBreak())
 
-        # --- Table of Contents with Volume grouping + page numbers ---
+        # --- Table of Contents ---
         story.append(RLParagraph("Table of Contents", styles["SectionHeading"]))
 
-        # Accent line under TOC heading
-        toc_line = RLTable([[""]], colWidths=[6.5 * inch], rowHeights=[2])
+        toc_line = RLTable([[""]], colWidths=[PDF_CONTENT_WIDTH], rowHeights=[2])
         toc_line.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5A623")),
         ]))
         story.append(toc_line)
         story.append(Spacer(1, 0.15 * inch))
 
-        # Volume grouping — dynamic or auto-fallback
         section_list = list(sections.items())
         total_sections = len(section_list)
         volume_assignments = proposal.get("volume_assignments", {})
@@ -1223,13 +1130,13 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
 
         vol_heading_style = ParagraphStyle(
             "VolHeading", parent=styles["Normal"],
-            fontSize=11, textColor=colors.HexColor(heading_hex),
+            fontSize=11, textColor=colors.HexColor("#0F1117"),
             fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4,
         )
         page_style = ParagraphStyle(
             "PageNum", parent=styles["TableCell"],
-            alignment=2,  # RIGHT
-            textColor=colors.HexColor("#6B7280"),
+            alignment=2,
+            textColor=colors.HexColor("#999999"),
         )
 
         page_num = 3
@@ -1242,7 +1149,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
 
             toc_data = []
             for local_idx, (section_key, section_data) in enumerate(vol_items):
-                section_title = section_data.get("title", section_key.replace("_", " ").title())
+                raw_t = section_data.get("title", ""); section_title = (raw_t if raw_t and "_" not in raw_t else section_key.replace("_", " ").title())
                 toc_data.append([
                     RLParagraph(f"<b>{global_idx + 1}.</b>", styles["TableCell"]),
                     RLParagraph(_escape_xml(section_title), styles["TableCell"]),
@@ -1252,46 +1159,49 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
                 global_idx += 1
 
             if toc_data:
-                toc_table = RLTable(toc_data, colWidths=[0.35 * inch, 5.35 * inch, 0.8 * inch])
+                toc_table = RLTable(toc_data, colWidths=[0.35 * inch, PDF_CONTENT_WIDTH - 1.15 * inch, 0.8 * inch])
                 toc_style = [
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                     ("TOPPADDING", (0, 0), (-1, -1), 3),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
                 ]
                 for i in range(0, len(toc_data), 2):
-                    toc_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F3F4F6")))
+                    toc_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1A1D27")))
                 toc_table.setStyle(TableStyle(toc_style))
                 story.append(toc_table)
 
         story.append(PageBreak())
 
-        # --- Content Sections (skip cover_page — already rendered as page 1) ---
+        # --- Content Sections ---
         pdf_content_sections = [(k, v) for k, v in sections.items() if k != "cover_page"]
         for idx, (section_key, section_data) in enumerate(pdf_content_sections, start=1):
-            section_title = section_data.get("title", section_key.replace("_", " ").title())
+            raw_t = section_data.get("title", ""); section_title = (raw_t if raw_t and "_" not in raw_t else section_key.replace("_", " ").title())
             content = section_data.get("content", "")
 
             if idx > 1:
                 story.append(PageBreak())
 
-            # Section heading
             story.append(RLParagraph(
                 f"{idx}. {_escape_xml(section_title)}",
                 styles["SectionHeading"],
             ))
 
-            # Accent line under heading
-            line = RLTable([[""]], colWidths=[6.5 * inch], rowHeights=[2])
+            line = RLTable([[""]], colWidths=[PDF_CONTENT_WIDTH], rowHeights=[2])
             line.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(accent_hex)),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5A623")),
             ]))
             story.append(line)
             story.append(Spacer(1, 0.15 * inch))
 
-            # Strip duplicate section title from content start
             content = _strip_leading_title(content, section_title)
 
-            # Parse and render content
+            # Render section images (constrained to page width)
+            section_images = section_data.get("images") or []
+            for img in section_images[:3]:
+                img_url = img.get("url", "") if isinstance(img, dict) else img
+                if img_url:
+                    _add_pdf_image(story, img_url, styles)
+
             parsed = _html_to_paragraphs(content)
             _render_pdf_content(story, parsed, styles, section_key)
             story.append(Spacer(1, 0.3 * inch))
@@ -1300,7 +1210,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         story.append(Spacer(1, 0.5 * inch))
         footer_style = ParagraphStyle(
             "Footer", parent=styles["Normal"],
-            fontSize=8, textColor=colors.HexColor("#6B7280"),
+            fontSize=8, textColor=colors.HexColor("#999999"),
             alignment=1, fontName="Helvetica-Oblique",
         )
         story.append(RLParagraph(
@@ -1308,7 +1218,7 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
             footer_style
         ))
 
-        # Footer callback — draws on every page
+        # Footer callback — dark background + gold accents on every page
         company_logo = proposal.get("company_logo", "")
         _pdf_logo_bytes = None
         if company_logo and company_logo.startswith("data:image"):
@@ -1321,39 +1231,50 @@ def generate_pdf(proposal: Dict) -> io.BytesIO:
         def _draw_footer(canvas, doc_obj):
             canvas.saveState()
             page_w, page_h = letter
-            footer_y = 0.4 * inch
 
-            # Left: company logo or name
+            # Dark background for entire page
+            canvas.setFillColor(colors.HexColor("#0F1117"))
+            canvas.rect(0, 0, page_w, page_h, fill=1, stroke=0)
+
+            # Gold top accent bar
+            canvas.setFillColor(colors.HexColor("#F5A623"))
+            canvas.rect(0, page_h - 4, page_w, 4, fill=1, stroke=0)
+
+            # Footer bar
+            footer_y = 0.35 * inch
+            canvas.setFillColor(colors.HexColor("#1A1D27"))
+            canvas.rect(0, 0, page_w, 0.6 * inch, fill=1, stroke=0)
+
             if _pdf_logo_bytes:
                 try:
                     from PIL import Image as PILImage
                     from reportlab.lib.utils import ImageReader
                     _pil = PILImage.open(io.BytesIO(_pdf_logo_bytes))
                     _iw, _ih = _pil.size
-                    _max_w, _max_h = 0.8, 0.3  # inches
+                    _max_w, _max_h = 0.8, 0.28
                     _scale = min(_max_w / (_iw / 96.0), _max_h / (_ih / 96.0), 1.0)
                     _fw = (_iw / 96.0) * _scale * inch
                     _fh = (_ih / 96.0) * _scale * inch
                     img_reader = ImageReader(io.BytesIO(_pdf_logo_bytes))
-                    canvas.drawImage(img_reader, 0.75 * inch, footer_y - _fh / 2, width=_fw, height=_fh)
+                    canvas.drawImage(img_reader, 0.75 * inch, footer_y - _fh / 2,
+                                     width=_fw, height=_fh, mask='auto')
                 except Exception:
                     canvas.setFont("Helvetica", 7)
-                    canvas.setFillColor(colors.HexColor("#6B7280"))
+                    canvas.setFillColor(colors.HexColor("#999999"))
                     canvas.drawString(0.75 * inch, footer_y, vendor_name or "")
             else:
                 canvas.setFont("Helvetica", 7)
-                canvas.setFillColor(colors.HexColor("#6B7280"))
+                canvas.setFillColor(colors.HexColor("#999999"))
                 canvas.drawString(0.75 * inch, footer_y, vendor_name or "")
 
-            # Center: page number
-            canvas.setFont("Helvetica", 8)
-            canvas.setFillColor(colors.HexColor("#6B7280"))
+            canvas.setFont("Helvetica-Bold", 8)
+            canvas.setFillColor(colors.HexColor("#F5A623"))
             canvas.drawCentredString(page_w / 2, footer_y, f"Page {canvas.getPageNumber()}")
 
-            # Right: Confidential + page total
             canvas.setFont("Helvetica", 7)
-            canvas.setFillColor(colors.HexColor("#6B7280"))
-            canvas.drawRightString(page_w - 0.75 * inch, footer_y, f"Confidential  |  {vendor_name or ''}")
+            canvas.setFillColor(colors.HexColor("#999999"))
+            canvas.drawRightString(page_w - 0.75 * inch, footer_y,
+                                   f"Confidential  |  {vendor_name or ''}")
 
             canvas.restoreState()
 
@@ -1379,7 +1300,6 @@ def _render_pdf_content(story, parsed, styles, section_key=""):
             i += 1
             continue
 
-        # Render HTML tables extracted from content
         if ptype == 'html_table':
             td = para.get('table_data', {})
             headers = td.get('headers', [])
@@ -1395,7 +1315,6 @@ def _render_pdf_content(story, parsed, styles, section_key=""):
             i += 1
             continue
 
-        # Detect table blocks
         if '|' in ptext and ptext.count('|') >= 2:
             table_lines = [ptext]
             j = i + 1
@@ -1426,33 +1345,31 @@ def _render_pdf_content(story, parsed, styles, section_key=""):
 
 
 def _add_pdf_table(story, headers, rows, styles):
-    """Add a styled table to PDF story."""
-    # Build table data with styled paragraphs
+    """Add a styled table to PDF story, constrained to page width."""
     header_row = [RLParagraph(f"<b>{_escape_xml(h)}</b>", styles["TableHeader"]) for h in headers]
     data = [header_row]
     for row in rows:
         data.append([RLParagraph(_escape_xml(str(c)), styles["TableCell"]) for c in row])
 
     num_cols = len(headers)
-    available_width = 6.5 * inch
-    col_width = available_width / num_cols
+    col_width = PDF_CONTENT_WIDTH / num_cols
 
     table = RLTable(data, colWidths=[col_width] * num_cols)
     table_style = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B2A4A")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F1117")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("ALIGN", (0, 0), (-1, 0), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#2D3148")),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("WORDWRAP", (0, 0), (-1, -1), True),
     ]
-    # Alternating row colors
     for i in range(1, len(data)):
         if i % 2 == 0:
-            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F3F4F6")))
+            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1A1D27")))
 
     table.setStyle(TableStyle(table_style))
     story.append(table)
@@ -1495,7 +1412,7 @@ def _load_image_bytes(src: str) -> Optional[bytes]:
 
 
 def _add_pdf_image(story, src: str, styles):
-    """Add an HTML image to the PDF story while preserving aspect ratio."""
+    """Add an image to the PDF story, strictly constrained to page width."""
     image_bytes = _load_image_bytes(src)
     if not image_bytes:
         return
@@ -1509,22 +1426,27 @@ def _add_pdf_image(story, src: str, styles):
         if width_px <= 0 or height_px <= 0:
             return
 
-        max_w = 5.8 * inch
-        max_h = 3.2 * inch
+        # Strictly constrain to content width — never exceed page margins
+        max_w = PDF_CONTENT_WIDTH
+        max_h = 3.0 * inch
         width_pt = width_px / 96.0 * inch
         height_pt = height_px / 96.0 * inch
         scale = min(max_w / width_pt, max_h / height_pt, 1.0)
 
         img = RLImage(io.BytesIO(image_bytes), width=width_pt * scale, height=height_pt * scale)
-        img.hAlign = "CENTER"
-        story.append(img)
+        img_table = RLTable([[img]], colWidths=[PDF_CONTENT_WIDTH])
+        img_table.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(img_table)
         story.append(Spacer(1, 8))
     except Exception as exc:
         logger.warning("Failed to render image in PDF: %s", exc)
 
 
 def _add_html_table_to_pdf(story, headers: List[str], rows: List[Dict], styles):
-    """Render an HTML table (with summary row support) as a styled PDF table."""
+    """Render an HTML table as a styled PDF table, constrained to page width."""
     if not headers and not rows:
         return
 
@@ -1557,32 +1479,31 @@ def _add_html_table_to_pdf(story, headers: List[str], rows: List[Dict], styles):
         if is_summary:
             summary_row_indices.append(actual_row_idx)
 
-    available_width = 6.5 * inch
-    col_width = available_width / num_cols
+    col_width = PDF_CONTENT_WIDTH / num_cols
 
     table = RLTable(data, colWidths=[col_width] * num_cols)
     table_style = [
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#2D3148")),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("WORDWRAP", (0, 0), (-1, -1), True),
     ]
 
     if headers:
         table_style.extend([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B2A4A")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F1117")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("ALIGN", (0, 0), (-1, 0), "CENTER"),
         ])
 
-    # Alternating row colors (skip header and summary rows)
     for i in range(1 if headers else 0, len(data)):
         if i in summary_row_indices:
-            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#E8F5E9")))
+            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1A1D27")))
         elif i % 2 == 0:
-            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F3F4F6")))
+            table_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#1A1D27")))
 
     table.setStyle(TableStyle(table_style))
     story.append(table)
@@ -1594,6 +1515,7 @@ def _add_html_table_to_pdf(story, headers: List[str], rows: List[Dict], styles):
 
 def _escape_xml(text: str) -> str:
     """Escape special XML characters for ReportLab Paragraph."""
+    text = str(text)
     text = text.replace("&", "&amp;")
     text = text.replace("<", "&lt;")
     text = text.replace(">", "&gt;")
@@ -1614,7 +1536,7 @@ def _markdown_bold_to_reportlab(text: str) -> str:
 
 
 def _parse_html_tables(html_content: str) -> List[Dict]:
-    """Extract HTML tables from content, returning list of {headers, rows, is_subtotal_row}."""
+    """Extract HTML tables from content."""
     tables = []
     table_pattern = re.compile(r'<table[^>]*>(.*?)</table>', re.DOTALL | re.IGNORECASE)
 
@@ -1623,7 +1545,6 @@ def _parse_html_tables(html_content: str) -> List[Dict]:
         headers = []
         rows = []
 
-        # Extract header cells from <th> tags
         th_pattern = re.compile(r'<th[^>]*>(.*?)</th>', re.DOTALL | re.IGNORECASE)
         header_row_match = re.search(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
         if header_row_match:
@@ -1631,19 +1552,16 @@ def _parse_html_tables(html_content: str) -> List[Dict]:
             if ths:
                 headers = [re.sub(r'<[^>]+>', '', h).strip() for h in ths]
 
-        # Extract data rows
         tr_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
         td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
 
         for i, tr_match in enumerate(tr_pattern.finditer(table_html)):
             row_html = tr_match.group(1)
-            # Skip the header row
             if i == 0 and th_pattern.search(row_html):
                 continue
             cells = td_pattern.findall(row_html)
             if cells:
                 cleaned = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
-                # Detect subtotal/total rows (have colspan or bold styling)
                 is_summary = bool(re.search(r'colspan|font-weight:\s*bold', tr_match.group(0), re.IGNORECASE))
                 rows.append({'cells': cleaned, 'is_summary': is_summary})
 
@@ -1654,13 +1572,12 @@ def _parse_html_tables(html_content: str) -> List[Dict]:
 
 
 def _html_to_paragraphs(html_content: str) -> list:
-    """Convert HTML content into structured paragraph dicts, preserving HTML tables."""
+    """Convert HTML content into structured paragraph dicts."""
     if not html_content:
         return []
 
     paragraphs = []
 
-    # First, extract and replace HTML tables/images with placeholders
     tables = _parse_html_tables(html_content)
     images = []
     text = html_content
@@ -1714,8 +1631,6 @@ def _html_to_paragraphs(html_content: str) -> list:
             paragraphs.append({'type': 'h1', 'text': line[2:].strip()})
         elif line.startswith('- ') or line.startswith('* ') or line.startswith('\u2022 '):
             prefix_len = 2
-            if line.startswith('\u2022 '):
-                prefix_len = 2
             paragraphs.append({'type': 'bullet', 'text': line[prefix_len:].strip()})
         elif re.match(r'^\d+\.\s', line):
             paragraphs.append({'type': 'numbered', 'text': re.sub(r'^\d+\.\s*', '', line).strip()})

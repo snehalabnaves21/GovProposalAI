@@ -2,8 +2,7 @@ import axios from "axios";
 
 const TOKEN_KEY = "govproposal_token";
 
-const API_URL =
-  import.meta.env.VITE_API_URL || "https://govproposalai-3.onrender.com";
+const API_URL = "http://127.0.0.1:8000";
 
 const api = axios.create({
   baseURL: API_URL,

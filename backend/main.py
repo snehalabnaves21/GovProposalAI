@@ -5,6 +5,9 @@ Government Proposal AI Generator powered by Google Gemini and SAM.gov API.
 Multi-tenant with user authentication, PostgreSQL-ready database, and admin panel.
 """
 
+# ⚠️ load_dotenv MUST be first — before any module that reads os.getenv()
+from dotenv import load_dotenv
+load_dotenv()
 
 import json
 import os
@@ -20,14 +23,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-print("GEMINI KEY:", os.getenv("GEMINI_API_KEY"))
 
 from models import (
     VendorProfile,
@@ -54,10 +55,7 @@ from routes.compliance import router as compliance_router
 from routes.n8n import router as n8n_router
 from routes.vendor_profile import router as vendor_profile_router
 
-
-# Load environment variables from .env file
-load_dotenv()
-
+print("KEY:", os.getenv("GEMINI_API_KEY"))
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -868,61 +866,82 @@ async def generate_proposal(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Generate a government contract proposal using AI.
-
-    Takes vendor profile, opportunity details, and desired sections.
-    Calls Google Gemini to generate professional proposal content for each section.
-    Saves the generated proposal to the database.
-    """
     try:
-        # Validate requested sections
-        valid_sections = []
-        for section in request.sections:
-            if section in AVAILABLE_SECTIONS:
-                valid_sections.append(section)
-            else:
-                logger.warning("Ignoring unknown section: %s", section)
+        # Validate sections
+        valid_sections = [
+            section for section in request.sections if section in AVAILABLE_SECTIONS
+        ]
 
         if not valid_sections:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"No valid sections requested. "
-                    f"Available sections: {AVAILABLE_SECTIONS}"
-                ),
+                detail=f"No valid sections requested. Available sections: {AVAILABLE_SECTIONS}",
             )
 
         logger.info(
-            "Generating proposal for '%s' targeting '%s' (%d sections) [user: %s]",
+            "Generating proposal for '%s' targeting '%s' (%d sections)",
             request.vendor.get("company_name", "Unknown"),
             request.opportunity.get("title", "Unknown"),
             len(valid_sections),
-            current_user.email,
         )
 
-        # Generate proposal sections via Gemini AI
-        generated_sections = ai_service.generate_proposal(
-            vendor=request.vendor,
-            opportunity=request.opportunity,
-            sections=valid_sections,
-        )
+        # 🔥 FIXED: Generate each section individually
+        generated_sections = {}
 
-        # Build response
+        for section in valid_sections:
+            try:
+                prompt = f"""
+You are a professional government proposal writer.
+
+Write a detailed, high-quality section for:
+
+{section}
+
+Vendor:
+{request.vendor.get("company_name", "")}
+
+Opportunity:
+{request.opportunity.get("title", "")}
+
+Description:
+{request.opportunity.get("description", "")}
+
+Make it formal, structured, and proposal-ready.
+"""
+
+                content = ai_service.generate_section(prompt)
+
+                generated_sections[section] = {
+                    "title": section,
+                    "content": content.strip() if content else "Content could not be generated.",
+                }
+
+            except Exception as e:
+                logger.error(f"Error generating section {section}: {e}")
+                generated_sections[section] = {
+                    "title": section,
+                    "content": f"Error generating content for {section}",
+                }
+
+        # Create response sections
         proposal_id = str(uuid.uuid4())
+
         sections_response = {
-            key: ProposalSection(title=val["title"], content=val["content"])
+            key: ProposalSection(
+                title=val["title"],
+                content=val["content"]
+            )
             for key, val in generated_sections.items()
         }
 
-        # Save proposal to database
+        # Metadata
         opp_title = request.opportunity.get("title", "Untitled Opportunity")
         opp_agency = request.opportunity.get("agency", "")
         opp_desc = request.opportunity.get("description", "")
 
-        # Build metadata for cover page persistence
         vendor_data = request.vendor or {}
         opp_data = request.opportunity or {}
+
         proposal_metadata = {
             "proposal_type": opp_data.get("proposal_type", "Government Contract Proposal"),
             "agency": opp_agency,
@@ -939,6 +958,7 @@ async def generate_proposal(
             "vendor_name": vendor_data.get("company_name", ""),
         }
 
+        # Save to DB
         db_proposal = Proposal(
             id=proposal_id,
             user_id=current_user.id,
@@ -947,16 +967,18 @@ async def generate_proposal(
             opportunity_agency=opp_agency,
             opportunity_description=opp_desc,
             sections={
-                key: {"title": val["title"], "content": val["content"]}
+                key: {
+                    "title": val["title"],
+                    "content": val["content"]
+                }
                 for key, val in generated_sections.items()
             },
             proposal_metadata=proposal_metadata,
             status="completed",
         )
+
         db.add(db_proposal)
         await db.flush()
-
-        logger.info("Proposal saved to DB: %s (user: %s)", proposal_id, current_user.email)
 
         # Audit log
         await log_audit(
@@ -964,7 +986,10 @@ async def generate_proposal(
             user_id=current_user.id,
             action="created_proposal",
             proposal_id=proposal_id,
-            details=json.dumps({"title": opp_title, "sections": len(valid_sections)}),
+            details=json.dumps({
+                "title": opp_title,
+                "sections": len(valid_sections)
+            }),
             ip_address=req.client.host if req.client else None,
         )
 
@@ -978,25 +1003,18 @@ async def generate_proposal(
 
     except HTTPException:
         raise
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
     except Exception as exc:
         logger.error("Proposal generation failed: %s", exc)
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate proposal: {exc}",
         )
-
-
 # ============================================================
 # AI Section Generation (authenticated)
 # ============================================================
 
 @app.post("/api/proposals/generate-section")
-async def generate_section(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
+async def generate_section(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "")
 
@@ -1044,6 +1062,27 @@ async def generate_section(
         return {
             "content": " ".join(summary)
         }
+@app.post("/api/ai/generate")
+async def ai_generate(request: Request):
+    body = await request.json()
+    prompt = body.get("prompt", "")
+
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required.")
+
+    try:
+        content = ai_service.generate_section(prompt)
+
+        return {
+            "content": content
+        }
+
+    except Exception as exc:
+        logger.error("AI generate failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI generation failed: {exc}"
+        )
 # ============================================================
 # RFP Deconstructor (authenticated)
 # ============================================================

@@ -7,7 +7,7 @@ import re
 import logging
 from typing import Dict, List, Optional
 
-import google.generativeai as genai
+from groq import Groq
 
 logger = logging.getLogger(__name__)
 
@@ -590,44 +590,41 @@ class AIService:
     """Service for generating proposal content using Google Gemini API."""
 
     def __init__(self) -> None:
-        raw_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.api_key: str = "" if raw_key.lower() in ("", "demo_mode", "demo") else raw_key
+        raw_key = os.getenv("GROQ_API_KEY", "").strip()
+
+        self.api_key = raw_key
         self.demo_mode = not bool(self.api_key)
+
         if self.demo_mode:
             logger.warning(
-                "GEMINI_API_KEY not set. Running in DEMO mode with template-based content. "
-                "Set GEMINI_API_KEY in .env for real AI generation."
+                "GROQ_API_KEY not set. Running in DEMO mode with template-based content."
             )
         else:
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(
-                model_name="gemini-2.0-flash",
-                system_instruction=SYSTEM_PROMPT,
-            )
+            self.client = Groq(api_key=self.api_key)
 
     def generate_section(self, prompt: str) -> str:
         """
-        Generate content for a single proposal section using Gemini.
-
-        Args:
-            prompt: The full prompt to send to the AI model.
-
-        Returns:
-            Generated text content for the section.
+        Generate content for a single proposal section using Groq.
         """
-        if self.demo_mode:
-            return self._generate_demo_text(prompt)
-
         try:
-            response = self.model.generate_content(prompt)
-            if response and response.text:
-                return response.text.strip()
-            logger.warning("Gemini returned empty response for prompt")
-            return "[Content generation returned empty response. Please retry.]"
-        except Exception as exc:
-            logger.error("Gemini API error: %s", exc)
-            raise RuntimeError(f"AI generation failed: {exc}")
+            if self.demo_mode:
+                return "Demo mode active. Please check API key."
 
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2000,
+                temperature=0.7,
+            )
+            return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            print("❌ GROQ ERROR:", e)
+            return f"AI ERROR: {str(e)}"
+    
     @staticmethod
     def _generate_demo_text(prompt: str) -> str:
         """Generate template-based content when no Gemini API key is configured."""
