@@ -55,7 +55,6 @@ from routes.compliance import router as compliance_router
 from routes.n8n import router as n8n_router
 from routes.vendor_profile import router as vendor_profile_router
 
-print("KEY:", os.getenv("GEMINI_API_KEY"))
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,

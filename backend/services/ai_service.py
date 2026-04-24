@@ -4,6 +4,7 @@ Google Gemini AI integration service for generating government proposal content.
 
 import os
 import re
+import time
 import logging
 from typing import Dict, List, Optional
 
@@ -605,25 +606,50 @@ class AIService:
     def generate_section(self, prompt: str) -> str:
         """
         Generate content for a single proposal section using Groq.
+        Includes automatic retry with exponential backoff for rate limit errors.
         """
-        try:
-            if self.demo_mode:
-                return "Demo mode active. Please check API key."
+        if self.demo_mode:
+            return "Demo mode active. Please check API key."
 
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=2000,
-                temperature=0.7,
-            )
-            return response.choices[0].message.content.strip()
+        max_retries = 4
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=2000,
+                    temperature=0.7,
+                )
+                return response.choices[0].message.content.strip()
 
-        except Exception as e:
-            print("❌ GROQ ERROR:", e)
-            return f"AI ERROR: {str(e)}"
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = (
+                    "rate limit" in error_str
+                    or "429" in error_str
+                    or "quota" in error_str
+                    or "too many requests" in error_str
+                    or "rate_limit_exceeded" in error_str
+                )
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning(
+                        "Groq rate limit hit, retrying in %ds (attempt %d/%d)",
+                        wait, attempt + 1, max_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+                # Non-rate-limit error or exhausted retries
+                print("❌ GROQ ERROR:", e)
+                if is_rate_limit:
+                    return (
+                        "AI quota exceeded for this section. "
+                        "Click AI Rewrite above to regenerate, or type your content below."
+                    )
+                return f"AI ERROR: {str(e)}"
     
     @staticmethod
     def _generate_demo_text(prompt: str) -> str:
