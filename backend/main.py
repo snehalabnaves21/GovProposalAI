@@ -2002,6 +2002,7 @@ async def payment_config():
 UPLOADS_DIR = DATA_DIR / "uploads"
 from fastapi.staticfiles import StaticFiles
 
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
