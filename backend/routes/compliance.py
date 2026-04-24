@@ -105,6 +105,113 @@ async def list_naics(
     ]
 
 
+@router.get("/naics/{code}/suggest-compliance")
+async def suggest_naics_compliance(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Based on a NAICS code from the business profile, suggest related compliance
+    requirements and show which ones the user has already confirmed.
+    """
+    result = await db.execute(select(NAICSCode).where(NAICSCode.code == code))
+    naics = result.scalar_one_or_none()
+    if not naics:
+        raise HTTPException(status_code=404, detail="NAICS code not found")
+
+    comp_result = await db.execute(
+        select(ComplianceRequirement, NAICSComplianceMap.priority_level)
+        .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
+        .where(NAICSComplianceMap.naics_id == naics.id)
+    )
+    requirements = comp_result.all()
+
+    company = await _get_company(db, current_user.id)
+    user_statuses = {}
+    if company:
+        cc_result = await db.execute(
+            select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
+        )
+        for cc in cc_result.scalars().all():
+            user_statuses[cc.compliance_id] = cc.status
+
+    suggested = []
+    for req, priority in requirements:
+        status = user_statuses.get(req.id, "not_started")
+        suggested.append({
+            "id": req.id,
+            "name": req.name,
+            "category": req.category,
+            "description": req.description,
+            "mandatory": req.mandatory,
+            "priority_level": priority,
+            "user_status": status,
+            "confirmed": status == "compliant",
+        })
+
+    return {
+        "naics_code": naics.code,
+        "naics_title": naics.title,
+        "suggested_compliance": suggested,
+        "total": len(suggested),
+        "confirmed_count": sum(1 for s in suggested if s["confirmed"]),
+    }
+
+
+@router.post("/naics/{code}/confirm-compliance/{requirement_id}")
+async def confirm_naics_compliance(
+    code: str,
+    requirement_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Toggle compliance confirmation for a NAICS-linked requirement."""
+    company = await _get_company(db, current_user.id)
+    if not company:
+        vp_result = await db.execute(
+            select(VendorProfileDB)
+            .where(VendorProfileDB.user_id == current_user.id)
+            .order_by(VendorProfileDB.updated_at.desc())
+        )
+        vendor = vp_result.scalar_one_or_none()
+        company = Company(
+            user_id=current_user.id,
+            name=vendor.company_name if vendor else "My Company",
+        )
+        db.add(company)
+        await db.flush()
+
+    req_result = await db.execute(
+        select(ComplianceRequirement).where(ComplianceRequirement.id == requirement_id)
+    )
+    if not req_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Compliance requirement not found")
+
+    result = await db.execute(
+        select(CompanyCompliance).where(
+            CompanyCompliance.company_id == company.id,
+            CompanyCompliance.compliance_id == requirement_id,
+        )
+    )
+    cc = result.scalar_one_or_none()
+
+    if cc:
+        cc.status = "not_started" if cc.status == "compliant" else "compliant"
+        new_status = cc.status
+    else:
+        cc = CompanyCompliance(
+            company_id=company.id,
+            compliance_id=requirement_id,
+            status="compliant",
+        )
+        db.add(cc)
+        new_status = "compliant"
+
+    await db.flush()
+    return {"requirement_id": requirement_id, "status": new_status, "confirmed": new_status == "compliant"}
+
+
 @router.get("/naics/{code}")
 async def get_naics_detail(code: str, db: AsyncSession = Depends(get_db)):
     """Get NAICS code details with associated compliance requirements and contract vehicles."""
@@ -113,7 +220,6 @@ async def get_naics_detail(code: str, db: AsyncSession = Depends(get_db)):
     if not naics:
         raise HTTPException(status_code=404, detail="NAICS code not found")
 
-    # Get compliance requirements
     comp_result = await db.execute(
         select(ComplianceRequirement, NAICSComplianceMap.priority_level)
         .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
@@ -128,7 +234,6 @@ async def get_naics_detail(code: str, db: AsyncSession = Depends(get_db)):
         for req, priority in comp_result.all()
     ]
 
-    # Get contract vehicles
     veh_result = await db.execute(
         select(ContractVehicle, NAICSContractMap.relevance_score)
         .join(NAICSContractMap, NAICSContractMap.contract_vehicle_id == ContractVehicle.id)
@@ -228,6 +333,46 @@ async def list_vehicles(
     ]
 
 
+@router.post("/vehicles")
+async def create_contract_vehicle(
+    data: ContractVehicleCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add a new contract vehicle (user-created)."""
+    agency_id = None
+    if data.agency_name:
+        ag_result = await db.execute(
+            select(Agency).where(Agency.name.ilike(f"%{data.agency_name}%"))
+        )
+        ag = ag_result.scalar_one_or_none()
+        if ag:
+            agency_id = ag.id
+
+    vehicle = ContractVehicle(
+        name=data.name,
+        type=data.type,
+        agency_id=agency_id,
+        description=data.description,
+        eligibility_criteria=data.eligibility_criteria,
+        website_url=data.website_url,
+        user_id=current_user.id,
+        is_active=True,
+    )
+    db.add(vehicle)
+    await db.flush()
+
+    return {
+        "id": vehicle.id,
+        "name": vehicle.name,
+        "type": vehicle.type,
+        "description": vehicle.description,
+        "agency_id": agency_id,
+        "website_url": vehicle.website_url,
+        "message": "Contract vehicle added",
+    }
+
+
 @router.get("/vehicles/{vehicle_id}")
 async def get_vehicle_detail(vehicle_id: str, db: AsyncSession = Depends(get_db)):
     """Get contract vehicle details with compliance requirements."""
@@ -238,7 +383,6 @@ async def get_vehicle_detail(vehicle_id: str, db: AsyncSession = Depends(get_db)
     if not vehicle:
         raise HTTPException(status_code=404, detail="Contract vehicle not found")
 
-    # Get compliance requirements for this vehicle
     comp_result = await db.execute(
         select(ComplianceRequirement, ContractComplianceMap.mandatory)
         .join(ContractComplianceMap, ContractComplianceMap.compliance_id == ComplianceRequirement.id)
@@ -252,7 +396,6 @@ async def get_vehicle_detail(vehicle_id: str, db: AsyncSession = Depends(get_db)
         for req, mand in comp_result.all()
     ]
 
-    # Get agency name
     agency_name = None
     if vehicle.agency_id:
         ag_result = await db.execute(select(Agency).where(Agency.id == vehicle.agency_id))
@@ -267,6 +410,27 @@ async def get_vehicle_detail(vehicle_id: str, db: AsyncSession = Depends(get_db)
         "eligibility_criteria": vehicle.eligibility_criteria,
         "compliance_requirements": requirements,
     }
+
+
+@router.delete("/vehicles/{vehicle_id}")
+async def delete_contract_vehicle(
+    vehicle_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a user-created contract vehicle."""
+    result = await db.execute(
+        select(ContractVehicle).where(
+            ContractVehicle.id == vehicle_id,
+            ContractVehicle.user_id == current_user.id,
+        )
+    )
+    vehicle = result.scalar_one_or_none()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found or not owned by you")
+
+    await db.delete(vehicle)
+    return {"detail": "Contract vehicle deleted"}
 
 
 # ──────────────────────────────────────────────
@@ -286,104 +450,281 @@ async def list_agencies(db: AsyncSession = Depends(get_db)):
 
 # ──────────────────────────────────────────────
 # Company Compliance
+# NOTE: Specific sub-routes (/company/check, /company/recommendations, etc.)
+# MUST be defined BEFORE the base /company GET route to avoid FastAPI
+# treating "check" and "recommendations" as path parameters.
 # ──────────────────────────────────────────────
 
-@router.get("/company")
-async def get_company_compliance(
+@router.get("/company/check")
+async def run_compliance_check(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get current user's company profile and compliance status. Auto-creates from business profile if none exists."""
+    """
+    Run a compliance check for the user's company.
+    Returns categorized results based on the company's NAICS codes:
+    compliant, in_progress, missing.
+    """
     company = await _get_company(db, current_user.id)
     if not company:
-        # Try to auto-create from business profile
-        vp_result = await db.execute(
-            select(VendorProfileDB)
-            .where(VendorProfileDB.user_id == current_user.id)
-            .order_by(VendorProfileDB.updated_at.desc())
-        )
-        vendor = vp_result.scalar_one_or_none()
-        if vendor:
-            company = Company(
-                user_id=current_user.id,
-                name=vendor.company_name or "",
-                uei=vendor.duns_number or "",
-                business_type=vendor.socioeconomic_status or "",
-                sam_registered=bool(vendor.cage_code),
-            )
-            db.add(company)
-            await db.flush()
-        else:
-            raise HTTPException(status_code=404, detail="No company profile found. Create one first.")
+        raise HTTPException(status_code=404, detail="No company profile found.")
 
-    # Get company NAICS codes
     naics_result = await db.execute(
-        select(NAICSCode, CompanyNAICS.is_primary)
-        .join(CompanyNAICS, CompanyNAICS.naics_id == NAICSCode.id)
-        .where(CompanyNAICS.company_id == company.id)
+        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
     )
-    naics_codes = [
-        {"id": n.id, "code": n.code, "title": n.title, "is_primary": primary}
-        for n, primary in naics_result.all()
-    ]
+    naics_ids = [row[0] for row in naics_result.all()]
 
-    # Get compliance statuses
-    comp_result = await db.execute(
-        select(ComplianceRequirement, CompanyCompliance)
-        .join(CompanyCompliance, CompanyCompliance.compliance_id == ComplianceRequirement.id)
-        .where(CompanyCompliance.company_id == company.id)
+    if not naics_ids:
+        return {"compliant": [], "in_progress": [], "missing": [], "summary": "No NAICS codes registered."}
+
+    req_result = await db.execute(
+        select(ComplianceRequirement, NAICSComplianceMap.priority_level)
+        .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
+        .where(NAICSComplianceMap.naics_id.in_(naics_ids))
     )
-    compliance_items = [
-        {
-            "compliance_id": req.id, "name": req.name, "category": req.category,
-            "mandatory": req.mandatory, "status": cc.status,
-            "certification_date": cc.certification_date.isoformat() if cc.certification_date else None,
-            "expiry_date": cc.expiry_date.isoformat() if cc.expiry_date else None,
-            "notes": cc.notes,
-        }
-        for req, cc in comp_result.all()
-    ]
+    required = {}
+    for req, priority in req_result.all():
+        if req.id not in required or priority == "High":
+            required[req.id] = {
+                "id": req.id, "name": req.name, "category": req.category,
+                "mandatory": req.mandatory, "priority_level": priority,
+            }
 
+    status_result = await db.execute(
+        select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
+    )
+    statuses = {cc.compliance_id: cc.status for cc in status_result.scalars().all()}
+
+    compliant = []
+    in_progress = []
+    missing = []
+
+    for req_id, req_info in required.items():
+        current_status = statuses.get(req_id, "Not Started")
+        entry = {**req_info, "current_status": current_status}
+        if current_status == "Compliant":
+            compliant.append(entry)
+        elif current_status == "In Progress":
+            in_progress.append(entry)
+        else:
+            missing.append(entry)
+
+    total = len(required)
     return {
-        "id": company.id,
-        "name": company.name,
-        "uei": company.uei,
-        "sam_registered": company.sam_registered,
-        "business_type": company.business_type,
-        "naics_codes": naics_codes,
-        "compliance": compliance_items,
-        "created_at": company.created_at.isoformat() if company.created_at else None,
-        "updated_at": company.updated_at.isoformat() if company.updated_at else None,
+        "compliant": compliant,
+        "in_progress": in_progress,
+        "missing": missing,
+        "summary": {
+            "total_requirements": total,
+            "compliant_count": len(compliant),
+            "in_progress_count": len(in_progress),
+            "missing_count": len(missing),
+            "compliance_percentage": round((len(compliant) / total * 100) if total > 0 else 0, 1),
+        },
     }
 
 
-@router.post("/company")
-async def create_or_update_company(
-    data: CompanyCreate,
+@router.get("/company/recommendations")
+async def get_recommendations(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create or update the user's company profile."""
+    """
+    Get AI-powered contract vehicle recommendations based on company
+    NAICS codes and compliance readiness.
+    """
     company = await _get_company(db, current_user.id)
-    if company:
-        company.name = data.name
-        company.uei = data.uei
-        company.sam_registered = data.sam_registered
-        company.business_type = data.business_type
-    else:
-        company = Company(
-            user_id=current_user.id,
-            name=data.name,
-            uei=data.uei,
-            sam_registered=data.sam_registered,
-            business_type=data.business_type,
+    if not company:
+        raise HTTPException(status_code=404, detail="No company profile found.")
+
+    naics_result = await db.execute(
+        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
+    )
+    naics_ids = [row[0] for row in naics_result.all()]
+
+    if not naics_ids:
+        return {"recommendations": [], "summary": "No NAICS codes registered."}
+
+    veh_result = await db.execute(
+        select(ContractVehicle, NAICSContractMap.relevance_score, NAICSContractMap.naics_id)
+        .join(NAICSContractMap, NAICSContractMap.contract_vehicle_id == ContractVehicle.id)
+        .where(NAICSContractMap.naics_id.in_(naics_ids))
+        .order_by(NAICSContractMap.relevance_score.desc())
+    )
+    vehicle_rows = veh_result.all()
+
+    status_result = await db.execute(
+        select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
+    )
+    statuses = {cc.compliance_id: cc.status for cc in status_result.scalars().all()}
+
+    seen_vehicles = {}
+    for vehicle, relevance, naics_id in vehicle_rows:
+        if vehicle.id in seen_vehicles:
+            if relevance > seen_vehicles[vehicle.id]["relevance_score"]:
+                seen_vehicles[vehicle.id]["relevance_score"] = relevance
+            continue
+
+        comp_result = await db.execute(
+            select(ContractComplianceMap)
+            .where(ContractComplianceMap.contract_vehicle_id == vehicle.id)
         )
+        vehicle_reqs = comp_result.scalars().all()
+
+        total_reqs = len(vehicle_reqs)
+        met_reqs = 0
+        missing_reqs = []
+        for vr in vehicle_reqs:
+            company_status = statuses.get(vr.compliance_id, "Not Started")
+            if company_status == "Compliant":
+                met_reqs += 1
+            else:
+                rn = await db.execute(
+                    select(ComplianceRequirement.name)
+                    .where(ComplianceRequirement.id == vr.compliance_id)
+                )
+                name = rn.scalar_one_or_none() or "Unknown"
+                missing_reqs.append({"compliance_id": vr.compliance_id, "name": name, "mandatory": vr.mandatory})
+
+        compliance_pct = round((met_reqs / total_reqs * 100) if total_reqs > 0 else 100, 1)
+        combined_score = round(relevance * 0.6 + compliance_pct * 0.4)
+
+        agency_name = None
+        if vehicle.agency_id:
+            ag_r = await db.execute(select(Agency.name).where(Agency.id == vehicle.agency_id))
+            agency_name = ag_r.scalar_one_or_none()
+
+        reason_parts = [f"Relevance score {relevance}/100 for your NAICS codes."]
+        if compliance_pct == 100:
+            reason_parts.append("You meet all compliance requirements.")
+        elif compliance_pct >= 50:
+            reason_parts.append(f"You meet {compliance_pct}% of requirements. {len(missing_reqs)} remaining.")
+        else:
+            reason_parts.append(f"Only {compliance_pct}% compliant. Significant gaps remain.")
+
+        seen_vehicles[vehicle.id] = {
+            "vehicle_id": vehicle.id,
+            "vehicle_name": vehicle.name,
+            "vehicle_type": vehicle.type,
+            "agency_name": agency_name,
+            "relevance_score": relevance,
+            "compliance_readiness": compliance_pct,
+            "combined_score": combined_score,
+            "reason": " ".join(reason_parts),
+            "missing_requirements": missing_reqs,
+        }
+
+    recommendations = sorted(seen_vehicles.values(), key=lambda x: x["combined_score"], reverse=True)
+    return {"recommendations": recommendations}
+
+
+@router.post("/company/sync-profile")
+async def sync_company_from_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Auto-populate the compliance company profile from the user's Business Profile
+    (vendor profile). Syncs company name, DUNS/UEI, business type, and NAICS codes.
+    """
+    vp_result = await db.execute(
+        select(VendorProfileDB)
+        .where(VendorProfileDB.user_id == current_user.id)
+        .order_by(VendorProfileDB.updated_at.desc())
+    )
+    vendor = vp_result.scalar_one_or_none()
+    if not vendor:
+        raise HTTPException(
+            status_code=404,
+            detail="No Business Profile found. Please set up your Business Profile first.",
+        )
+
+    company = await _get_company(db, current_user.id)
+    if not company:
+        company = Company(user_id=current_user.id)
         db.add(company)
 
+    company.name = vendor.company_name or company.name
+    company.uei = vendor.duns_number or company.uei
+    company.business_type = vendor.socioeconomic_status or company.business_type
+    company.sam_registered = bool(vendor.cage_code)
+
     await db.flush()
+
+    vp_naics = vendor.naics_codes or []
+    synced_naics = []
+    for i, code_str in enumerate(vp_naics):
+        code_clean = str(code_str).strip().split(" ")[0].split("-")[0].strip()
+        if not code_clean:
+            continue
+
+        naics_result = await db.execute(
+            select(NAICSCode).where(NAICSCode.code == code_clean)
+        )
+        naics = naics_result.scalar_one_or_none()
+        if not naics:
+            continue
+
+        existing = await db.execute(
+            select(CompanyNAICS).where(
+                CompanyNAICS.company_id == company.id,
+                CompanyNAICS.naics_id == naics.id,
+            )
+        )
+        if not existing.scalar_one_or_none():
+            db.add(CompanyNAICS(
+                company_id=company.id,
+                naics_id=naics.id,
+                is_primary=(i == 0),
+            ))
+
+        synced_naics.append({"code": naics.code, "title": naics.title})
+
+    naics_ids_result = await db.execute(
+        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
+    )
+    naics_ids = [r[0] for r in naics_ids_result.all()]
+
+    if naics_ids:
+        req_ids_result = await db.execute(
+            select(NAICSComplianceMap.compliance_id)
+            .where(NAICSComplianceMap.naics_id.in_(naics_ids))
+            .distinct()
+        )
+        req_ids = [r[0] for r in req_ids_result.all()]
+
+        for req_id in req_ids:
+            existing_cc = await db.execute(
+                select(CompanyCompliance).where(
+                    CompanyCompliance.company_id == company.id,
+                    CompanyCompliance.compliance_id == req_id,
+                )
+            )
+            if not existing_cc.scalar_one_or_none():
+                db.add(CompanyCompliance(
+                    company_id=company.id,
+                    compliance_id=req_id,
+                    status="not_started",
+                ))
+
+    await db.flush()
+
     return {
-        "id": company.id, "name": company.name, "uei": company.uei,
-        "sam_registered": company.sam_registered, "business_type": company.business_type,
+        "message": "Company profile synced from Business Profile",
+        "company": {
+            "id": company.id,
+            "name": company.name,
+            "uei": company.uei,
+            "sam_registered": company.sam_registered,
+            "business_type": company.business_type,
+        },
+        "synced_naics": synced_naics,
+        "source": {
+            "company_name": vendor.company_name,
+            "cage_code": vendor.cage_code,
+            "duns_number": vendor.duns_number,
+            "naics_codes_count": len(vp_naics),
+        },
     }
 
 
@@ -398,12 +739,10 @@ async def add_company_naics(
     if not company:
         raise HTTPException(status_code=404, detail="No company profile found. Create one first.")
 
-    # Verify NAICS exists
     naics_result = await db.execute(select(NAICSCode).where(NAICSCode.id == data.naics_id))
     if not naics_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="NAICS code not found")
 
-    # Check for duplicate
     existing = await db.execute(
         select(CompanyNAICS).where(
             and_(CompanyNAICS.company_id == company.id, CompanyNAICS.naics_id == data.naics_id)
@@ -456,14 +795,12 @@ async def update_compliance_status(
     if not company:
         raise HTTPException(status_code=404, detail="No company profile found.")
 
-    # Verify compliance requirement exists
     req_result = await db.execute(
         select(ComplianceRequirement).where(ComplianceRequirement.id == compliance_id)
     )
     if not req_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Compliance requirement not found")
 
-    # Get or create CompanyCompliance record
     result = await db.execute(
         select(CompanyCompliance).where(
             and_(CompanyCompliance.company_id == company.id, CompanyCompliance.compliance_id == compliance_id)
@@ -498,185 +835,110 @@ async def update_compliance_status(
     return {"compliance_id": compliance_id, "status": data.status, "detail": "Compliance status updated"}
 
 
-@router.get("/company/check")
-async def run_compliance_check(
+# ── Base /company routes LAST ──────────────────
+
+@router.get("/company")
+async def get_company_compliance(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Run a compliance check for the user's company.
-
-    Returns categorized results based on the company's NAICS codes:
-    compliant, in_progress, missing.
-    """
+    """Get current user's company profile and compliance status. Auto-creates from business profile if none exists."""
     company = await _get_company(db, current_user.id)
     if not company:
-        raise HTTPException(status_code=404, detail="No company profile found.")
-
-    # 1. Get company NAICS codes
-    naics_result = await db.execute(
-        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
-    )
-    naics_ids = [row[0] for row in naics_result.all()]
-
-    if not naics_ids:
-        return {"compliant": [], "in_progress": [], "missing": [], "summary": "No NAICS codes registered."}
-
-    # 2. Get all required compliance requirements for these NAICS codes
-    req_result = await db.execute(
-        select(ComplianceRequirement, NAICSComplianceMap.priority_level)
-        .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
-        .where(NAICSComplianceMap.naics_id.in_(naics_ids))
-    )
-    # Deduplicate requirements (same req may appear via multiple NAICS)
-    required = {}
-    for req, priority in req_result.all():
-        if req.id not in required or priority == "High":
-            required[req.id] = {
-                "id": req.id, "name": req.name, "category": req.category,
-                "mandatory": req.mandatory, "priority_level": priority,
-            }
-
-    # 3. Get company's compliance statuses
-    status_result = await db.execute(
-        select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
-    )
-    statuses = {cc.compliance_id: cc.status for cc in status_result.scalars().all()}
-
-    # 4. Categorize
-    compliant = []
-    in_progress = []
-    missing = []
-
-    for req_id, req_info in required.items():
-        current_status = statuses.get(req_id, "Not Started")
-        entry = {**req_info, "current_status": current_status}
-        if current_status == "Compliant":
-            compliant.append(entry)
-        elif current_status == "In Progress":
-            in_progress.append(entry)
+        vp_result = await db.execute(
+            select(VendorProfileDB)
+            .where(VendorProfileDB.user_id == current_user.id)
+            .order_by(VendorProfileDB.updated_at.desc())
+        )
+        vendor = vp_result.scalar_one_or_none()
+        if vendor:
+            company = Company(
+                user_id=current_user.id,
+                name=vendor.company_name or "",
+                uei=vendor.duns_number or "",
+                business_type=vendor.socioeconomic_status or "",
+                sam_registered=bool(vendor.cage_code),
+            )
+            db.add(company)
+            await db.flush()
         else:
-            missing.append(entry)
+            raise HTTPException(status_code=404, detail="No company profile found. Create one first.")
 
-    total = len(required)
+    naics_result = await db.execute(
+        select(NAICSCode, CompanyNAICS.is_primary)
+        .join(CompanyNAICS, CompanyNAICS.naics_id == NAICSCode.id)
+        .where(CompanyNAICS.company_id == company.id)
+    )
+    naics_codes = [
+        {"id": n.id, "code": n.code, "title": n.title, "is_primary": primary}
+        for n, primary in naics_result.all()
+    ]
+
+    comp_result = await db.execute(
+        select(ComplianceRequirement, CompanyCompliance)
+        .join(CompanyCompliance, CompanyCompliance.compliance_id == ComplianceRequirement.id)
+        .where(CompanyCompliance.company_id == company.id)
+    )
+    # FIX: key renamed from "compliance" to "compliance_statuses" to match frontend
+    compliance_items = [
+        {
+            "compliance_id": req.id, "name": req.name, "category": req.category,
+            "mandatory": req.mandatory, "status": cc.status,
+            "certification_date": cc.certification_date.isoformat() if cc.certification_date else None,
+            "expiry_date": cc.expiry_date.isoformat() if cc.expiry_date else None,
+            "notes": cc.notes,
+        }
+        for req, cc in comp_result.all()
+    ]
+
+    # Calculate compliance score
+    total = len(compliance_items)
+    compliant_count = sum(1 for c in compliance_items if c["status"] in ("compliant", "Compliant"))
+    compliance_score = round((compliant_count / total * 100) if total > 0 else 0, 1)
+
     return {
-        "compliant": compliant,
-        "in_progress": in_progress,
-        "missing": missing,
-        "summary": {
-            "total_requirements": total,
-            "compliant_count": len(compliant),
-            "in_progress_count": len(in_progress),
-            "missing_count": len(missing),
-            "compliance_percentage": round((len(compliant) / total * 100) if total > 0 else 0, 1),
-        },
+        "id": company.id,
+        "name": company.name,
+        "uei": company.uei,
+        "sam_registered": company.sam_registered,
+        "business_type": company.business_type,
+        "naics_codes": naics_codes,
+        "compliance_statuses": compliance_items,   # ← FIXED: was "compliance"
+        "compliance_score": compliance_score,       # ← ADDED: frontend uses this
+        "eligible_vehicles": [],                    # ← ADDED: frontend uses this
+        "created_at": company.created_at.isoformat() if company.created_at else None,
+        "updated_at": company.updated_at.isoformat() if company.updated_at else None,
     }
 
 
-@router.get("/company/recommendations")
-async def get_recommendations(
+@router.post("/company")
+async def create_or_update_company(
+    data: CompanyCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Get AI-powered contract vehicle recommendations based on company
-    NAICS codes and compliance readiness.
-    """
+    """Create or update the user's company profile."""
     company = await _get_company(db, current_user.id)
-    if not company:
-        raise HTTPException(status_code=404, detail="No company profile found.")
-
-    # 1. Get company NAICS codes
-    naics_result = await db.execute(
-        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
-    )
-    naics_ids = [row[0] for row in naics_result.all()]
-
-    if not naics_ids:
-        return {"recommendations": [], "summary": "No NAICS codes registered."}
-
-    # 2. Find matching contract vehicles via NAICS-contract map
-    veh_result = await db.execute(
-        select(ContractVehicle, NAICSContractMap.relevance_score, NAICSContractMap.naics_id)
-        .join(NAICSContractMap, NAICSContractMap.contract_vehicle_id == ContractVehicle.id)
-        .where(NAICSContractMap.naics_id.in_(naics_ids))
-        .order_by(NAICSContractMap.relevance_score.desc())
-    )
-    vehicle_rows = veh_result.all()
-
-    # 3. Get company compliance statuses
-    status_result = await db.execute(
-        select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
-    )
-    statuses = {cc.compliance_id: cc.status for cc in status_result.scalars().all()}
-
-    # 4. Score and build recommendations (deduplicate by vehicle)
-    seen_vehicles = {}
-    for vehicle, relevance, naics_id in vehicle_rows:
-        if vehicle.id in seen_vehicles:
-            # Keep higher relevance score
-            if relevance > seen_vehicles[vehicle.id]["relevance_score"]:
-                seen_vehicles[vehicle.id]["relevance_score"] = relevance
-            continue
-
-        # Get compliance requirements for this vehicle
-        comp_result = await db.execute(
-            select(ContractComplianceMap)
-            .where(ContractComplianceMap.contract_vehicle_id == vehicle.id)
+    if company:
+        company.name = data.name
+        company.uei = data.uei
+        company.sam_registered = data.sam_registered
+        company.business_type = data.business_type
+    else:
+        company = Company(
+            user_id=current_user.id,
+            name=data.name,
+            uei=data.uei,
+            sam_registered=data.sam_registered,
+            business_type=data.business_type,
         )
-        vehicle_reqs = comp_result.scalars().all()
+        db.add(company)
 
-        total_reqs = len(vehicle_reqs)
-        met_reqs = 0
-        missing_reqs = []
-        for vr in vehicle_reqs:
-            company_status = statuses.get(vr.compliance_id, "Not Started")
-            if company_status == "Compliant":
-                met_reqs += 1
-            else:
-                # Look up requirement name
-                rn = await db.execute(
-                    select(ComplianceRequirement.name)
-                    .where(ComplianceRequirement.id == vr.compliance_id)
-                )
-                name = rn.scalar_one_or_none() or "Unknown"
-                missing_reqs.append({"compliance_id": vr.compliance_id, "name": name, "mandatory": vr.mandatory})
-
-        compliance_pct = round((met_reqs / total_reqs * 100) if total_reqs > 0 else 100, 1)
-        # Combined score: 60% relevance + 40% compliance readiness
-        combined_score = round(relevance * 0.6 + compliance_pct * 0.4)
-
-        # Get agency name
-        agency_name = None
-        if vehicle.agency_id:
-            ag_r = await db.execute(select(Agency.name).where(Agency.id == vehicle.agency_id))
-            agency_name = ag_r.scalar_one_or_none()
-
-        # Build reason
-        reason_parts = [f"Relevance score {relevance}/100 for your NAICS codes."]
-        if compliance_pct == 100:
-            reason_parts.append("You meet all compliance requirements.")
-        elif compliance_pct >= 50:
-            reason_parts.append(f"You meet {compliance_pct}% of requirements. {len(missing_reqs)} remaining.")
-        else:
-            reason_parts.append(f"Only {compliance_pct}% compliant. Significant gaps remain.")
-
-        seen_vehicles[vehicle.id] = {
-            "vehicle_id": vehicle.id,
-            "vehicle_name": vehicle.name,
-            "vehicle_type": vehicle.type,
-            "agency_name": agency_name,
-            "relevance_score": relevance,
-            "compliance_readiness": compliance_pct,
-            "combined_score": combined_score,
-            "reason": " ".join(reason_parts),
-            "missing_requirements": missing_reqs,
-        }
-
-    # Sort by combined score descending
-    recommendations = sorted(seen_vehicles.values(), key=lambda x: x["combined_score"], reverse=True)
-
-    return {"recommendations": recommendations}
+    await db.flush()
+    return {
+        "id": company.id, "name": company.name, "uei": company.uei,
+        "sam_registered": company.sam_registered, "business_type": company.business_type,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -690,7 +952,6 @@ async def run_proposal_compliance_check(
     current_user: User = Depends(get_current_user),
 ):
     """Run compliance check for a specific proposal."""
-    # Verify proposal belongs to user
     result = await db.execute(
         select(Proposal).where(
             and_(Proposal.id == proposal_id, Proposal.user_id == current_user.id)
@@ -704,7 +965,6 @@ async def run_proposal_compliance_check(
     if not company:
         raise HTTPException(status_code=404, detail="No company profile found.")
 
-    # Get company NAICS codes
     naics_result = await db.execute(
         select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
     )
@@ -713,7 +973,6 @@ async def run_proposal_compliance_check(
     if not naics_ids:
         return {"proposal_id": proposal_id, "checks": [], "summary": "No NAICS codes registered."}
 
-    # Get required compliance for company's NAICS codes
     req_result = await db.execute(
         select(ComplianceRequirement)
         .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
@@ -721,20 +980,17 @@ async def run_proposal_compliance_check(
     )
     required = {r.id: r for r in req_result.scalars().all()}
 
-    # Get company compliance statuses
     status_result = await db.execute(
         select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
     )
     statuses = {cc.compliance_id: cc.status for cc in status_result.scalars().all()}
 
-    # Delete old checks for this proposal
     old_checks = await db.execute(
         select(ProposalComplianceCheck).where(ProposalComplianceCheck.proposal_id == proposal_id)
     )
     for old in old_checks.scalars().all():
         await db.delete(old)
 
-    # Create new checks
     checks = []
     for req_id, req in required.items():
         company_status = statuses.get(req_id, "Not Started")
@@ -786,7 +1042,6 @@ async def get_proposal_compliance_results(
     current_user: User = Depends(get_current_user),
 ):
     """Get existing compliance check results for a proposal."""
-    # Verify proposal belongs to user
     result = await db.execute(
         select(Proposal).where(
             and_(Proposal.id == proposal_id, Proposal.user_id == current_user.id)
@@ -823,309 +1078,3 @@ async def get_proposal_compliance_results(
             "ready": len(checks) > 0 and passed == len(checks),
         },
     }
-
-
-# ──────────────────────────────────────────────
-# Sync Company from Business Profile
-# ──────────────────────────────────────────────
-
-@router.post("/company/sync-profile")
-async def sync_company_from_profile(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Auto-populate the compliance company profile from the user's Business Profile
-    (vendor profile). Syncs company name, DUNS/UEI, business type, and NAICS codes.
-    """
-    # Get the user's vendor profile
-    vp_result = await db.execute(
-        select(VendorProfileDB)
-        .where(VendorProfileDB.user_id == current_user.id)
-        .order_by(VendorProfileDB.updated_at.desc())
-    )
-    vendor = vp_result.scalar_one_or_none()
-    if not vendor:
-        raise HTTPException(
-            status_code=404,
-            detail="No Business Profile found. Please set up your Business Profile first.",
-        )
-
-    # Get or create compliance company
-    company = await _get_company(db, current_user.id)
-    if not company:
-        company = Company(user_id=current_user.id)
-        db.add(company)
-
-    # Sync fields from vendor profile
-    company.name = vendor.company_name or company.name
-    company.uei = vendor.duns_number or company.uei  # DUNS/UEI
-    company.business_type = vendor.socioeconomic_status or company.business_type
-    company.sam_registered = bool(vendor.cage_code)  # If they have a CAGE code, likely SAM registered
-
-    await db.flush()
-
-    # Sync NAICS codes from vendor profile
-    vp_naics = vendor.naics_codes or []
-    synced_naics = []
-    for i, code_str in enumerate(vp_naics):
-        # Clean up - could be "541511" or "541511 - Custom Computer Programming"
-        code_clean = str(code_str).strip().split(" ")[0].split("-")[0].strip()
-        if not code_clean:
-            continue
-
-        # Find matching NAICS in compliance DB
-        naics_result = await db.execute(
-            select(NAICSCode).where(NAICSCode.code == code_clean)
-        )
-        naics = naics_result.scalar_one_or_none()
-        if not naics:
-            continue
-
-        # Check if already linked
-        existing = await db.execute(
-            select(CompanyNAICS).where(
-                CompanyNAICS.company_id == company.id,
-                CompanyNAICS.naics_id == naics.id,
-            )
-        )
-        if not existing.scalar_one_or_none():
-            db.add(CompanyNAICS(
-                company_id=company.id,
-                naics_id=naics.id,
-                is_primary=(i == 0),  # First one is primary
-            ))
-
-        synced_naics.append({"code": naics.code, "title": naics.title})
-
-    # Auto-populate compliance requirements for linked NAICS
-    naics_ids_result = await db.execute(
-        select(CompanyNAICS.naics_id).where(CompanyNAICS.company_id == company.id)
-    )
-    naics_ids = [r[0] for r in naics_ids_result.all()]
-
-    if naics_ids:
-        req_ids_result = await db.execute(
-            select(NAICSComplianceMap.compliance_id)
-            .where(NAICSComplianceMap.naics_id.in_(naics_ids))
-            .distinct()
-        )
-        req_ids = [r[0] for r in req_ids_result.all()]
-
-        for req_id in req_ids:
-            existing_cc = await db.execute(
-                select(CompanyCompliance).where(
-                    CompanyCompliance.company_id == company.id,
-                    CompanyCompliance.compliance_id == req_id,
-                )
-            )
-            if not existing_cc.scalar_one_or_none():
-                db.add(CompanyCompliance(
-                    company_id=company.id,
-                    compliance_id=req_id,
-                    status="not_started",
-                ))
-
-    await db.flush()
-
-    return {
-        "message": "Company profile synced from Business Profile",
-        "company": {
-            "id": company.id,
-            "name": company.name,
-            "uei": company.uei,
-            "sam_registered": company.sam_registered,
-            "business_type": company.business_type,
-        },
-        "synced_naics": synced_naics,
-        "source": {
-            "company_name": vendor.company_name,
-            "cage_code": vendor.cage_code,
-            "duns_number": vendor.duns_number,
-            "naics_codes_count": len(vp_naics),
-        },
-    }
-
-
-# ──────────────────────────────────────────────
-# Add Custom Contract Vehicle
-# ──────────────────────────────────────────────
-
-@router.post("/vehicles")
-async def create_contract_vehicle(
-    data: ContractVehicleCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Add a new contract vehicle (user-created)."""
-    # Look up agency by name if provided
-    agency_id = None
-    if data.agency_name:
-        ag_result = await db.execute(
-            select(Agency).where(Agency.name.ilike(f"%{data.agency_name}%"))
-        )
-        ag = ag_result.scalar_one_or_none()
-        if ag:
-            agency_id = ag.id
-
-    vehicle = ContractVehicle(
-        name=data.name,
-        type=data.type,
-        agency_id=agency_id,
-        description=data.description,
-        eligibility_criteria=data.eligibility_criteria,
-        website_url=data.website_url,
-        user_id=current_user.id,
-        is_active=True,
-    )
-    db.add(vehicle)
-    await db.flush()
-
-    return {
-        "id": vehicle.id,
-        "name": vehicle.name,
-        "type": vehicle.type,
-        "description": vehicle.description,
-        "agency_id": agency_id,
-        "website_url": vehicle.website_url,
-        "message": "Contract vehicle added",
-    }
-
-
-@router.delete("/vehicles/{vehicle_id}")
-async def delete_contract_vehicle(
-    vehicle_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Delete a user-created contract vehicle."""
-    result = await db.execute(
-        select(ContractVehicle).where(
-            ContractVehicle.id == vehicle_id,
-            ContractVehicle.user_id == current_user.id,
-        )
-    )
-    vehicle = result.scalar_one_or_none()
-    if not vehicle:
-        raise HTTPException(status_code=404, detail="Vehicle not found or not owned by you")
-
-    await db.delete(vehicle)
-    return {"detail": "Contract vehicle deleted"}
-
-
-# ──────────────────────────────────────────────
-# NAICS Compliance Suggestions (AI-based)
-# ──────────────────────────────────────────────
-
-@router.get("/naics/{code}/suggest-compliance")
-async def suggest_naics_compliance(
-    code: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Based on a NAICS code from the business profile, suggest related compliance
-    requirements and show which ones the user has already confirmed.
-    """
-    # Find NAICS
-    result = await db.execute(select(NAICSCode).where(NAICSCode.code == code))
-    naics = result.scalar_one_or_none()
-    if not naics:
-        raise HTTPException(status_code=404, detail="NAICS code not found")
-
-    # Get all compliance requirements for this NAICS
-    comp_result = await db.execute(
-        select(ComplianceRequirement, NAICSComplianceMap.priority_level)
-        .join(NAICSComplianceMap, NAICSComplianceMap.compliance_id == ComplianceRequirement.id)
-        .where(NAICSComplianceMap.naics_id == naics.id)
-    )
-    requirements = comp_result.all()
-
-    # Get user's company compliance statuses
-    company = await _get_company(db, current_user.id)
-    user_statuses = {}
-    if company:
-        cc_result = await db.execute(
-            select(CompanyCompliance).where(CompanyCompliance.company_id == company.id)
-        )
-        for cc in cc_result.scalars().all():
-            user_statuses[cc.compliance_id] = cc.status
-
-    suggested = []
-    for req, priority in requirements:
-        status = user_statuses.get(req.id, "not_started")
-        suggested.append({
-            "id": req.id,
-            "name": req.name,
-            "category": req.category,
-            "description": req.description,
-            "mandatory": req.mandatory,
-            "priority_level": priority,
-            "user_status": status,
-            "confirmed": status == "compliant",
-        })
-
-    return {
-        "naics_code": naics.code,
-        "naics_title": naics.title,
-        "suggested_compliance": suggested,
-        "total": len(suggested),
-        "confirmed_count": sum(1 for s in suggested if s["confirmed"]),
-    }
-
-
-@router.post("/naics/{code}/confirm-compliance/{requirement_id}")
-async def confirm_naics_compliance(
-    code: str,
-    requirement_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Toggle compliance confirmation for a NAICS-linked requirement."""
-    company = await _get_company(db, current_user.id)
-    if not company:
-        # Auto-create company from business profile
-        vp_result = await db.execute(
-            select(VendorProfileDB)
-            .where(VendorProfileDB.user_id == current_user.id)
-            .order_by(VendorProfileDB.updated_at.desc())
-        )
-        vendor = vp_result.scalar_one_or_none()
-        company = Company(
-            user_id=current_user.id,
-            name=vendor.company_name if vendor else "My Company",
-        )
-        db.add(company)
-        await db.flush()
-
-    # Verify requirement exists
-    req_result = await db.execute(
-        select(ComplianceRequirement).where(ComplianceRequirement.id == requirement_id)
-    )
-    if not req_result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Compliance requirement not found")
-
-    # Toggle status
-    result = await db.execute(
-        select(CompanyCompliance).where(
-            CompanyCompliance.company_id == company.id,
-            CompanyCompliance.compliance_id == requirement_id,
-        )
-    )
-    cc = result.scalar_one_or_none()
-
-    if cc:
-        # Toggle between compliant and not_started
-        cc.status = "not_started" if cc.status == "compliant" else "compliant"
-        new_status = cc.status
-    else:
-        cc = CompanyCompliance(
-            company_id=company.id,
-            compliance_id=requirement_id,
-            status="compliant",
-        )
-        db.add(cc)
-        new_status = "compliant"
-
-    await db.flush()
-    return {"requirement_id": requirement_id, "status": new_status, "confirmed": new_status == "compliant"}
